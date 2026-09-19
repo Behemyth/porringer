@@ -123,14 +123,12 @@ class TestActionOrdering:
             # Declare manifest sections in a deliberately "wrong" order
             # (tools before packages, scm before runtimes) to prove the
             # sort — not declaration order — determines the result.
-            manifest = SetupManifest.model_validate(
-                {
-                    'url': 'https://github.com/synodic/periapsis',
-                    'tools': {'python': ['pdm-tool']},
-                    'runtimes': {'python': ['3.14']},
-                    'packages': {'python': ['ruff']},
-                }
-            )
+            manifest = SetupManifest.model_validate({
+                'url': 'https://github.com/synodic/periapsis',
+                'tools': {'python': ['pdm-tool']},
+                'runtimes': {'python': ['3.14']},
+                'packages': {'python': ['ruff']},
+            })
 
             plugins = DiscoveredPlugins(
                 environments={

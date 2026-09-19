@@ -72,12 +72,10 @@ class TestScmFromUrl:
     @staticmethod
     def test_explicit_scm_entry_prevents_duplicate() -> None:
         """An explicit scm section wins; no duplicate clone is synthesized."""
-        manifest = SetupManifest.model_validate(
-            {
-                'url': 'https://github.com/synodic/periapsis',
-                'scm': {'git': ['https://github.com/synodic/periapsis']},
-            }
-        )
+        manifest = SetupManifest.model_validate({
+            'url': 'https://github.com/synodic/periapsis',
+            'scm': {'git': ['https://github.com/synodic/periapsis']},
+        })
 
         actions = build_actions(manifest, _plugins_with_git())
 

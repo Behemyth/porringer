@@ -163,12 +163,10 @@ class TestBootstrapSynthesis:
     @staticmethod
     def test_preference_for_other_tool_suppresses_bootstrap() -> None:
         """preferences={'python': 'uv'} must not trigger a pipx bootstrap."""
-        manifest = SetupManifest.model_validate(
-            {
-                'tools': {'python': ['pdm']},
-                'preferences': {'python': 'uv'},
-            }
-        )
+        manifest = SetupManifest.model_validate({
+            'tools': {'python': ['pdm']},
+            'preferences': {'python': 'uv'},
+        })
         environments: dict[str, Environment] = {
             'pipx': _make_pipx(available=False),
             'uv': _make_uv_tool(available=False),
@@ -182,12 +180,10 @@ class TestBootstrapSynthesis:
     @staticmethod
     def test_explicit_pipx_entry_dedupes_with_bootstrap() -> None:
         """An explicit pipx package entry prevents a duplicate synthesized action."""
-        manifest = SetupManifest.model_validate(
-            {
-                'packages': {'python': ['pipx']},
-                'tools': {'python': ['pdm']},
-            }
-        )
+        manifest = SetupManifest.model_validate({
+            'packages': {'python': ['pipx']},
+            'tools': {'python': ['pdm']},
+        })
         environments: dict[str, Environment] = {
             'pipx': _make_pipx(available=False),
             'pip': _make_pip(available=True),
