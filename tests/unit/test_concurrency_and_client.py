@@ -10,12 +10,14 @@ Validates:
 """
 
 import asyncio
+import contextlib
 import inspect
 from pathlib import Path
 from typing import override
 from unittest.mock import MagicMock, patch
 
 import aiohttp
+import pytest
 from packaging.version import Version
 
 from porringer.backend.command.core import execution as execution_module
@@ -36,7 +38,14 @@ from porringer.core.schema import (
     PluginKind,
     PluginParameters,
 )
-from porringer.schema import ProgressEvent, SetupAction, SetupActionResult, SetupParameters, SetupResults
+from porringer.schema import (
+    ActionCompletedEvent,
+    ProgressEvent,
+    SetupAction,
+    SetupActionResult,
+    SetupParameters,
+    SetupResults,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -426,3 +435,76 @@ class TestParallelPackagesFailFast:
         assert len(failed) == 1
         assert failed[0].message == 'boom'
         assert (failed[0].action.package.name if failed[0].action.package else '') == failing_package
+
+
+class TestPackageCancellation:
+    """Package execution must preserve caller cancellation semantics."""
+
+    @staticmethod
+    async def test_attempt_operation_propagates_cancellation() -> None:
+        """A cancelled plugin operation is not converted into a failed result."""
+        action = _make_action('cancelled-package')
+        event_queue: asyncio.Queue[ProgressEvent | None] = asyncio.Queue()
+
+        async def cancelled_operation(_params):
+            raise asyncio.CancelledError()
+
+        with pytest.raises(asyncio.CancelledError):
+            await execution_module._attempt_operation(
+                action,
+                spec=execution_module.OperationSpec(
+                    execute=cancelled_operation,
+                    verb='install',
+                    verb_past='Installed',
+                ),
+                event_queue=event_queue,
+            )
+
+    @staticmethod
+    @pytest.mark.parametrize('source', ['child', 'caller'])
+    async def test_parallel_cancellation_cleans_up_siblings(source: str) -> None:
+        """Cancellation settles siblings without emitting completed results."""
+        cancelled_action = _make_action('cancelled-package')
+        sibling_action = _make_action('sibling-package')
+        sibling_started = asyncio.Event()
+        sibling_finished = asyncio.Event()
+        block = asyncio.Event()
+        event_queue: asyncio.Queue[ProgressEvent | None] = asyncio.Queue()
+
+        async def execute_package(action: SetupAction, *_args, **_kwargs) -> None:
+            if action is cancelled_action:
+                await sibling_started.wait()
+                if source == 'child':
+                    raise asyncio.CancelledError()
+                await block.wait()
+            else:
+                try:
+                    sibling_started.set()
+                    await block.wait()
+                finally:
+                    sibling_finished.set()
+
+        with patch.object(execution_module, 'execute_package', side_effect=execute_package):
+            owner = asyncio.create_task(
+                execution_module._run_parallel_packages(
+                    [cancelled_action, sibling_action],
+                    {'stub': _StubEnv(_MOCK_PARAMS)},
+                    SetupParameters(max_concurrency=2),
+                    event_queue,
+                )
+            )
+            try:
+                await asyncio.wait_for(sibling_started.wait(), timeout=5)
+                if source == 'caller':
+                    owner.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await asyncio.wait_for(asyncio.shield(owner), timeout=5)
+            finally:
+                owner.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await asyncio.wait_for(owner, timeout=5)
+
+        assert sibling_finished.is_set()
+        assert owner.cancelled()
+        while not event_queue.empty():
+            assert not isinstance(event_queue.get_nowait(), ActionCompletedEvent)

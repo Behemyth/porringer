@@ -786,7 +786,7 @@ async def _attempt_operation(
         message = str(e)
     except asyncio.CancelledError:
         logger.error(f'{spec.verb.capitalize()} cancelled for {action.package}')
-        message = f'{spec.verb.capitalize()} cancelled'
+        raise
     except TimeoutError as e:
         logger.error(f'Timeout {spec.verb}ing {action.package}: {e}')
         message = str(e)
@@ -946,6 +946,7 @@ async def _run_parallel_packages(
     results: dict[int, SetupActionResult] = {}
     max_concurrency = parameters.max_concurrency
     semaphore: asyncio.Semaphore | None = asyncio.Semaphore(max_concurrency) if max_concurrency > 0 else None
+    owner_task = asyncio.current_task()
 
     async def package_with_event(index: int, action: SetupAction) -> None:
         if semaphore is not None:
@@ -963,6 +964,10 @@ async def _run_parallel_packages(
                         context,
                         package_cache=package_cache,
                     )
+            except asyncio.CancelledError:
+                if owner_task is not None and not owner_task.cancelling():
+                    owner_task.cancel()
+                raise
             except Exception as e:
                 result = SetupActionResult(action=action, success=False, message=str(e))
             _emit_completed(action, result, ref, event_queue, started_at)
