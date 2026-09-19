@@ -145,6 +145,7 @@ class TestManifestValidation:
 
             dup_warnings = [w for w in result.warnings if w.code == ManifestValidationCode.DUPLICATE_PACKAGE]
             assert len(dup_warnings) == 1
+            assert dup_warnings[0].field == 'packages.python'
             assert 'requests' in dup_warnings[0].message
 
     @staticmethod

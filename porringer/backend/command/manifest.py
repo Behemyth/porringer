@@ -633,7 +633,7 @@ def _validate_duplicate_packages(
     for pkg_name, locations in seen.items():
         if len(locations) > 1:
             warning_callback(
-                kind.value,
+                locations[0],
                 f"Package '{pkg_name}' is listed under multiple sections: {', '.join(locations)}",
                 ManifestValidationCode.DUPLICATE_PACKAGE,
             )
