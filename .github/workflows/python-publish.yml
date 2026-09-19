@@ -4,7 +4,22 @@ on:
     types: [published]
 
 jobs:
+  verify:
+    uses: synodic/.github/.github/workflows/python-check.yml@stable
+
+  format:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pdm-project/setup-pdm@v4
+        with:
+          python-version: "3.14"
+          cache: true
+      - run: pdm install
+      - run: pdm run ruff format --check porringer tests
+
   publish_release:
+    needs: [verify, format]
     if: github.repository_owner == 'synodic'
     uses: synodic/.github/.github/workflows/python-publish.yml@stable
     with:
