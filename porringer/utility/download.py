@@ -213,8 +213,13 @@ async def _download_attempt(
             suffix='.tmp',
         )
         temp_path = Path(temp_path_str)
+        try:
+            file_handle = cast(Any, os.fdopen(temp_fd, 'wb'))
+        except Exception:
+            os.close(temp_fd)
+            raise
 
-        result = await _perform_download(session, temp_fd, state, cancellation_token)
+        result = await _perform_download(session, file_handle, state, cancellation_token)
 
         if result.success:
             temp_path.replace(state.parameters.destination)
@@ -308,7 +313,7 @@ async def download_file(
 
 async def _perform_download(
     session: aiohttp.ClientSession,
-    temp_fd: int,
+    file_handle: Any,
     state: _DownloadState,
     cancellation_token: CancellationToken | None,
 ) -> DownloadResult:
@@ -316,7 +321,7 @@ async def _perform_download(
 
     Args:
         session: Shared aiohttp session.
-        temp_fd: File descriptor for temp file.
+        file_handle: Open temporary file owned by this function.
         state: Download state with parameters and callbacks.
         cancellation_token: Optional cancellation token.
 
@@ -329,35 +334,32 @@ async def _perform_download(
 
     downloaded = 0
 
-    # ``aiohttp.ClientResponseError`` is intentionally left to propagate so the
-    # caller's retry logic can handle HTTP errors.
-    async with (
-        asyncio.timeout(state.parameters.timeout),
-        session.get(state.parameters.url, allow_redirects=True) as response,
-    ):
-        response.raise_for_status()
+    try:
+        # ``aiohttp.ClientResponseError`` is intentionally left to propagate so the
+        # caller's retry logic can handle HTTP errors.
+        async with (
+            asyncio.timeout(state.parameters.timeout),
+            session.get(state.parameters.url, allow_redirects=True) as response,
+        ):
+            response.raise_for_status()
 
-        total_size: int | None = None
-        content_length = response.headers.get('Content-Length')
-        if content_length:
-            total_size = int(content_length)
+            total_size: int | None = None
+            content_length = response.headers.get('Content-Length')
+            if content_length:
+                total_size = int(content_length)
 
-        # Validate size from headers
-        if state.parameters.expected_size and total_size and total_size != state.parameters.expected_size:
-            return DownloadResult(
-                success=False,
-                message=f'Size mismatch: expected {state.parameters.expected_size}, got {total_size}',
-            )
+            # Validate size from headers
+            if state.parameters.expected_size and total_size and total_size != state.parameters.expected_size:
+                return DownloadResult(
+                    success=False,
+                    message=f'Size mismatch: expected {state.parameters.expected_size}, got {total_size}',
+                )
 
-        # ``temp_fd`` is an already-open descriptor from ``mkstemp``; ``open`` only
-        # wraps it (no blocking filesystem open). Chunk writes are offloaded below.
-        file_handle = cast(Any, await asyncio.to_thread(os.fdopen, temp_fd, 'wb'))
-        try:
             async for chunk in response.content.iter_chunked(state.parameters.chunk_size):
                 if cancellation_token is not None:
                     cancellation_token.raise_if_cancelled()
 
-                await asyncio.to_thread(file_handle.write, chunk)
+                await _write_chunk(file_handle, chunk)
                 downloaded += len(chunk)
 
                 if hasher:
@@ -365,8 +367,8 @@ async def _perform_download(
 
                 if state.progress_callback:
                     state.progress_callback(downloaded, total_size)
-        finally:
-            await asyncio.to_thread(file_handle.close)
+    finally:
+        file_handle.close()
 
     logger.info(f'Downloaded {downloaded} bytes')
 
@@ -376,3 +378,13 @@ async def _perform_download(
         return error
 
     return DownloadResult(success=True, path=state.parameters.destination, verified=bool(hasher), size=downloaded)
+
+
+async def _write_chunk(file_handle: Any, chunk: bytes) -> None:
+    """Write one chunk without abandoning the worker thread on cancellation."""
+    write_task = asyncio.create_task(asyncio.to_thread(file_handle.write, chunk))
+    try:
+        await asyncio.shield(write_task)
+    except asyncio.CancelledError:
+        await write_task
+        raise
