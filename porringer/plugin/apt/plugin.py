@@ -3,7 +3,6 @@
 Plugin implementation for APT (Advanced Package Tool) package manager.
 """
 
-import logging
 import sys
 from pathlib import Path
 from typing import override
@@ -11,7 +10,9 @@ from typing import override
 from porringer.core.plugin_schema.environment import (
     CheckUpdatesParameters,
     Environment,
+    PackageCommand,
     PackageParameters,
+    PackageVerb,
 )
 from porringer.core.plugin_schema.runtime import RuntimeContext
 from porringer.core.schema import Ecosystem, Package, PackageRef
@@ -65,14 +66,24 @@ class APTEnvironment(Environment):
         self, package: PackageRef, *, include_prereleases: bool = False, runtime_context: RuntimeContext | None = None
     ) -> list[str]:
         """Returns the CLI command to install a package via apt."""
-        return ['apt', 'install', package.specifier_for('equals')]
+        return ['apt', 'install', '-y', package.specifier_for('equals')]
 
     @override
     def upgrade_command(
         self, package: PackageRef, *, include_prereleases: bool = False, runtime_context: RuntimeContext | None = None
     ) -> list[str]:
         """Returns the CLI command to upgrade a package via apt."""
-        return ['apt', 'install', '--only-upgrade', package.specifier_for('equals')]
+        return ['apt', 'install', '-y', '--only-upgrade', package.specifier_for('equals')]
+
+    @override
+    def package_command(self, verb: PackageVerb, params: PackageParameters) -> PackageCommand:
+        """Keep APT dry runs log-only while retaining the complete argv."""
+        command = super().package_command(verb, params)
+        if params.dry and verb in {'install', 'upgrade'}:
+            args = list(command.argv)
+            args.insert(2, '--simulate')
+            return PackageCommand(argv=tuple(args), execute=False)
+        return command
 
     @override
     def uninstall_command(self, package: PackageRef, *, runtime_context: RuntimeContext | None = None) -> list[str]:
@@ -111,53 +122,25 @@ class APTEnvironment(Environment):
     async def install(self, params: PackageParameters) -> Package | None:
         """Asynchronously installs a package using APT.
 
-        Overrides the base to use `-y` auto-confirm and resolve
-        the installed version afterward.
+        Resolves the installed version after the shared command runs.
         """
-        logger = logging.getLogger('porringer.apt.install')
-        package = params.package.name
-
-        if params.dry:
-            args = ['apt', 'install', '--simulate', package]
-            logger.info(f'[dry-run] Would run: {" ".join(args)}')
-            return Package(name=params.package.name, version=None)
-
-        result = await self._execute_command(
-            args=['apt', 'install', '-y', package],
-            params=params,
-            phase='installing',
-            verb='install',
-        )
-        if result is not None:
-            version = await self._get_package_version(package)
+        result = await super().install(params)
+        if result is not None and not params.dry:
+            version = await self._get_package_version(params.package.name)
             return Package(name=result.name, version=version)
-        return None
+        return result
 
     @override
     async def upgrade(self, params: PackageParameters) -> Package | None:
         """Asynchronously upgrades a package using APT.
 
-        Overrides the base to use `-y --only-upgrade` and resolve
-        the installed version afterward.
+        Resolves the installed version after the shared command runs.
         """
-        logger = logging.getLogger('porringer.apt.upgrade')
-        package = params.package.name
-
-        if params.dry:
-            args = ['apt', 'install', '--simulate', '--only-upgrade', package]
-            logger.info(f'[dry-run] Would run: {" ".join(args)}')
-            return Package(name=params.package.name, version=None)
-
-        result = await self._execute_command(
-            args=['apt', 'install', '-y', '--only-upgrade', package],
-            params=params,
-            phase='upgrading',
-            verb='upgrade',
-        )
-        if result is not None:
-            version = await self._get_package_version(package)
+        result = await super().upgrade(params)
+        if result is not None and not params.dry:
+            version = await self._get_package_version(params.package.name)
             return Package(name=result.name, version=version)
-        return None
+        return result
 
     @override
     async def packages(

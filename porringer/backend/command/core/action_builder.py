@@ -16,7 +16,7 @@ from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.version import InvalidVersion, Version
 
 from porringer.backend.backend import BackendResolver
-from porringer.core.plugin_schema.environment import Environment
+from porringer.core.plugin_schema.environment import Environment, PackageParameters
 from porringer.core.plugin_schema.project_environment import ProjectInstaller
 from porringer.core.schema import Ecosystem, PackageRef, PluginKind
 from porringer.schema import (
@@ -166,19 +166,14 @@ def get_cli_steps(
         case PluginKind.PACKAGE | PluginKind.TOOL | PluginKind.RUNTIME:
             if action.installer and action.package and action.installer in environments:
                 env = environments[action.installer]
-                if strategy == SyncStrategy.LATEST:
-                    cmd = env.upgrade_command(
-                        action.package,
-                        include_prereleases=action.include_prereleases,
-                        runtime_context=runtime_context,
-                    )
-                else:
-                    cmd = env.install_command(
-                        action.package,
-                        include_prereleases=action.include_prereleases,
-                        runtime_context=runtime_context,
-                    )
-                return (tuple(cmd),) if cmd else ()
+                verb = 'upgrade' if strategy == SyncStrategy.LATEST else 'install'
+                params = PackageParameters(
+                    package=action.package,
+                    include_prereleases=action.include_prereleases,
+                    runtime_context=runtime_context,
+                )
+                command = env.package_command(verb, params)
+                return (command.argv,) if command.argv else ()
         case PluginKind.PROJECT:
             proj_envs = project_environments or {}
             if action.installer and action.installer in proj_envs:

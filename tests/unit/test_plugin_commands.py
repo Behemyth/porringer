@@ -17,11 +17,18 @@ Together with the protocol matrix this replaces the per-plugin
 
 from __future__ import annotations
 
+from unittest.mock import patch
+
 import pytest
 
-from porringer.backend.command.core.discovery import discover_all_plugins
-from porringer.core.plugin_schema.environment import Environment
-from porringer.core.schema import PackageRef
+from porringer.backend.command.core.action_builder import get_cli_steps
+from porringer.backend.command.core.discovery import DiscoveredPlugins, discover_all_plugins
+from porringer.core.plugin_schema.environment import Environment, PackageParameters
+from porringer.core.schema import Ecosystem, Package, PackageRef, PluginKind
+from porringer.plugin.apt.plugin import APTEnvironment
+from porringer.plugin.winget.plugin import WingetEnvironment
+from porringer.schema import SetupAction, SyncStrategy
+from tests.fixtures.command_process import CommandProcess
 
 
 def _env_pairs() -> list[tuple[str, Environment]]:
@@ -96,3 +103,67 @@ class TestEnvironmentCommandBehaviour:
         c = plugin.install_command(_BARE, include_prereleases=False)
         d = plugin.install_command(_BARE, include_prereleases=False)
         assert c == d
+
+
+@pytest.mark.parametrize('plugin_type', [APTEnvironment, WingetEnvironment], ids=['apt', 'winget'])
+@pytest.mark.parametrize('operation', ['install', 'upgrade'])
+@pytest.mark.parametrize('constraint', [None, '1.2.3'], ids=['unconstrained', 'pinned'])
+@pytest.mark.parametrize('returncode', [0, 1], ids=['success', 'failure'])
+async def test_system_package_command_contract(
+    plugin_type: type[Environment],
+    operation: str,
+    constraint: str | None,
+    returncode: int,
+    command_process: CommandProcess,
+) -> None:
+    """Preview and execution use the shared hook and independently specified argv."""
+    plugin = plugin_type.__new__(plugin_type)
+    package = PackageRef(name='example', constraint=constraint)
+    installer = 'apt' if plugin_type is APTEnvironment else 'winget'
+    if installer == 'apt':
+        expected = ['apt', 'install', '-y']
+        if operation == 'upgrade':
+            expected.append('--only-upgrade')
+        expected.append('example=1.2.3' if constraint else 'example')
+    else:
+        expected = [
+            'winget',
+            operation,
+            '--id',
+            'example',
+            '--accept-source-agreements',
+            '--accept-package-agreements',
+            '-e',
+        ]
+        if constraint:
+            expected.extend(['--version', '1.2.3'])
+
+    action = SetupAction(
+        description=f'{operation} example',
+        kind=PluginKind.PACKAGE,
+        ecosystem=Ecosystem('system'),
+        installer=installer,
+        package=package,
+    )
+    plugins = DiscoveredPlugins(environments={installer: plugin}, project_environments={}, scm_environments={})
+    strategy = SyncStrategy.MINIMAL if operation == 'install' else SyncStrategy.LATEST
+    params = PackageParameters(package=package)
+    command_process.script(expected, returncode=returncode)
+    version_query = ['dpkg-query', '-W', '-f', '${Version}', 'example']
+    command_process.script(version_query, stdout='1.2.3')
+
+    with patch.object(plugin, 'package_command', wraps=plugin.package_command) as build_command:
+        assert get_cli_steps(action, plugins, strategy) == (tuple(expected),)
+        command_process.assert_no_calls()
+        build_command.assert_called_once_with(operation, params)
+        build_command.reset_mock()
+        result = await plugin.install(params) if operation == 'install' else await plugin.upgrade(params)
+        build_command.assert_called_once_with(operation, params)
+
+    expected_calls = [expected]
+    version = None
+    if installer == 'apt' and returncode == 0:
+        expected_calls.append(version_query)
+        version = '1.2.3'
+    assert command_process.argv_list == expected_calls
+    assert result == (Package(name='example', version=version) if returncode == 0 else None)

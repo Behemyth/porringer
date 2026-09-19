@@ -32,6 +32,14 @@ PackageVerb = Literal['install', 'upgrade', 'uninstall']
 
 
 @dataclass(frozen=True, slots=True)
+class PackageCommand:
+    """Concrete command and dry-run behavior for one package operation."""
+
+    argv: tuple[str, ...]
+    execute: bool = True
+
+
+@dataclass(frozen=True, slots=True)
 class BootstrapRequirement:
     """Describes a prerequisite package needed before a tool can be used.
 
@@ -298,6 +306,31 @@ class Environment(ToolBasedPlugin):
         del self, line, channel, action
         return None
 
+    def package_command(self, verb: PackageVerb, params: PackageParameters) -> PackageCommand:
+        """Build the command for a package operation.
+
+        The default adapter preserves the existing command-builder methods
+        while giving preview and execution one command-construction seam.
+        """
+        if verb == 'install':
+            args = self.install_command(
+                params.package,
+                include_prereleases=params.include_prereleases,
+                runtime_context=params.runtime_context,
+            )
+        elif verb == 'upgrade':
+            args = self.upgrade_command(
+                params.package,
+                include_prereleases=params.include_prereleases,
+                runtime_context=params.runtime_context,
+            )
+        else:
+            args = self.uninstall_command(params.package, runtime_context=params.runtime_context)
+
+        if params.dry:
+            args = [*args, *self.dry_run_flags(verb)]
+        return PackageCommand(argv=tuple(args))
+
     async def install(self, params: PackageParameters) -> Package | None:
         """Asynchronously installs the given package identified by its name.
 
@@ -315,14 +348,8 @@ class Environment(ToolBasedPlugin):
         Returns:
             The package, or None if installation failed
         """
-        args = list(
-            self.install_command(
-                params.package,
-                include_prereleases=params.include_prereleases,
-                runtime_context=params.runtime_context,
-            )
-        )
-        return await self._execute_command(args=args, params=params, phase='installing', verb='install')
+        command = self.package_command('install', params)
+        return await self._execute_package_command(command, params, phase='installing', verb='install')
 
     async def upgrade(self, params: PackageParameters) -> Package | None:
         """Asynchronously upgrades the given package.
@@ -341,14 +368,8 @@ class Environment(ToolBasedPlugin):
         Returns:
             The package, or None if the upgrade failed.
         """
-        args = list(
-            self.upgrade_command(
-                params.package,
-                include_prereleases=params.include_prereleases,
-                runtime_context=params.runtime_context,
-            )
-        )
-        return await self._execute_command(args=args, params=params, phase='upgrading', verb='upgrade')
+        command = self.package_command('upgrade', params)
+        return await self._execute_package_command(command, params, phase='upgrading', verb='upgrade')
 
     async def uninstall(self, params: PackageParameters) -> Package | None:
         """Asynchronously uninstalls the given package.
@@ -367,10 +388,8 @@ class Environment(ToolBasedPlugin):
         Returns:
             The package, or None if the uninstall failed.
         """
-        args = list(self.uninstall_command(params.package, runtime_context=params.runtime_context))
-        uninstall_logger = logging.getLogger(f'porringer.{self.tool_name()}.uninstall')
-        uninstall_logger.debug('uninstall command: %s', args)
-        return await self._execute_command(args=args, params=params, phase='uninstalling', verb='uninstall')
+        command = self.package_command('uninstall', params)
+        return await self._execute_package_command(command, params, phase='uninstalling', verb='uninstall')
 
     # --- Helpers ----------------------------------------------------------
 
@@ -388,6 +407,27 @@ class Environment(ToolBasedPlugin):
             package=package,
         )
 
+    async def _execute_package_command(
+        self,
+        command: PackageCommand,
+        params: PackageParameters,
+        *,
+        phase: str,
+        verb: PackageVerb,
+    ) -> Package | None:
+        """Execute or report a command according to its dry-run policy."""
+        if not command.execute:
+            logger = logging.getLogger(f'porringer.{self.tool_name()}.{verb}')
+            logger.info('[dry-run] Would run: %s', ' '.join(command.argv))
+            return Package(name=params.package.name, version=None)
+        return await self._execute_command(
+            args=list(command.argv),
+            params=params,
+            phase=phase,
+            verb=verb,
+            apply_dry_run_flags=False,
+        )
+
     async def _execute_command(
         self,
         *,
@@ -395,6 +435,7 @@ class Environment(ToolBasedPlugin):
         params: PackageParameters,
         phase: str,
         verb: PackageVerb,
+        apply_dry_run_flags: bool = True,
     ) -> Package | None:
         """Run *args* as an async subprocess with line-by-line progress.
 
@@ -407,6 +448,9 @@ class Environment(ToolBasedPlugin):
             params: Package parameters.
             phase: Phase label for progress events (e.g. ``"installing"``).
             verb: Human-readable verb for log messages (e.g. ``"install"``).
+            apply_dry_run_flags: Whether to append native dry-run flags before
+                execution. ``PackageCommand`` callers provide their complete
+                command and disable this to avoid adding flags twice.
 
         Returns:
             The installed/upgraded package, or ``None`` on failure.
@@ -417,7 +461,7 @@ class Environment(ToolBasedPlugin):
             package=params.package,
         )
         # Apply native dry-run flags when the plugin advertises them.
-        if params.dry:
+        if params.dry and apply_dry_run_flags:
             extra = list(self.dry_run_flags(verb))
             if extra:
                 args = [*args, *extra]

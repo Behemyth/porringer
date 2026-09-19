@@ -11,7 +11,9 @@ from typing import override
 from porringer.core.plugin_schema.environment import (
     CheckUpdatesParameters,
     Environment,
+    PackageCommand,
     PackageParameters,
+    PackageVerb,
 )
 from porringer.core.plugin_schema.runtime import RuntimeContext
 from porringer.core.schema import Ecosystem, Package, PackageRef
@@ -48,6 +50,7 @@ class WingetEnvironment(Environment):
     ) -> list[str]:
         """Returns the CLI command to install a package via winget."""
         cmd = ['winget', 'install', '--id', package.name]
+        cmd.extend(['--accept-source-agreements', '--accept-package-agreements', '-e'])
         if package.constraint:
             cmd.extend(['--version', package.constraint])
         return cmd
@@ -58,9 +61,18 @@ class WingetEnvironment(Environment):
     ) -> list[str]:
         """Returns the CLI command to upgrade a package via winget."""
         cmd = ['winget', 'upgrade', '--id', package.name]
+        cmd.extend(['--accept-source-agreements', '--accept-package-agreements', '-e'])
         if package.constraint:
             cmd.extend(['--version', package.constraint])
         return cmd
+
+    @override
+    def package_command(self, verb: PackageVerb, params: PackageParameters) -> PackageCommand:
+        """Keep Winget dry runs log-only while sharing command construction."""
+        command = super().package_command(verb, params)
+        if params.dry and verb in {'install', 'upgrade'}:
+            return PackageCommand(argv=command.argv, execute=False)
+        return command
 
     @override
     def uninstall_command(self, package: PackageRef, *, runtime_context: RuntimeContext | None = None) -> list[str]:
@@ -174,63 +186,3 @@ class WingetEnvironment(Environment):
             A list of packages
         """
         return []
-
-    @override
-    async def install(self, params: PackageParameters) -> Package | None:
-        """Asynchronously installs the given package using winget.
-
-        Overrides the base to add `--accept-source-agreements` and
-        other winget-specific flags.
-        """
-        pkg = params.package
-        args = [
-            'winget',
-            'install',
-            '--id',
-            pkg.name,
-            '--accept-source-agreements',
-            '--accept-package-agreements',
-            '-e',
-        ]
-        if pkg.constraint:
-            args.extend(['--version', pkg.constraint])
-        if params.dry:
-            logging.getLogger('porringer.winget.install').info(f'[dry-run] Would run: {" ".join(args)}')
-            return Package(name=pkg.name, version=None)
-
-        return await self._execute_command(
-            args=args,
-            params=params,
-            phase='installing',
-            verb='install',
-        )
-
-    @override
-    async def upgrade(self, params: PackageParameters) -> Package | None:
-        """Asynchronously upgrades the given package using winget.
-
-        Overrides the base to add `--accept-source-agreements` and
-        other winget-specific flags.
-        """
-        pkg = params.package
-        args = [
-            'winget',
-            'upgrade',
-            '--id',
-            pkg.name,
-            '--accept-source-agreements',
-            '--accept-package-agreements',
-            '-e',
-        ]
-        if pkg.constraint:
-            args.extend(['--version', pkg.constraint])
-        if params.dry:
-            logging.getLogger('porringer.winget.upgrade').info(f'[dry-run] Would run: {" ".join(args)}')
-            return Package(name=pkg.name, version=None)
-
-        return await self._execute_command(
-            args=args,
-            params=params,
-            phase='upgrading',
-            verb='upgrade',
-        )
