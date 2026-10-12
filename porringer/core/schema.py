@@ -26,7 +26,7 @@ __all__ = [
 
 from packaging.requirements import InvalidRequirement, Requirement
 from packaging.version import Version
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 Ecosystem = NewType('Ecosystem', str)
 """Semantic alias for ecosystem identifiers (e.g. `"python"`, `"node"`).
@@ -68,7 +68,12 @@ _PEP440_CONSTRAINT_START = re.compile(r'[><=!~]')
 class PorringerModel(BaseModel):
     """The base model to use for all Porringer models."""
 
-    model_config = {'populate_by_name': False, 'arbitrary_types_allowed': True, 'extra': 'forbid'}
+    model_config = ConfigDict(
+        validate_by_name=False,
+        validate_by_alias=True,
+        arbitrary_types_allowed=True,
+        extra='forbid',
+    )
 
 
 class PlatformScoped(PorringerModel):

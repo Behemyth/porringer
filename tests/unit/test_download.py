@@ -6,16 +6,91 @@ import asyncio
 import contextlib
 import hashlib
 import os
+import subprocess
+import sys
 import threading
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import BinaryIO, cast
+from unittest.mock import AsyncMock
 
 import aiohttp
 import pytest
 
-from porringer.schema import DownloadParameters, HashAlgorithm
+from porringer.schema import DownloadParameters, DownloadResult, HashAlgorithm
 from porringer.utility import download as download_utility
+
+
+def test_retry_dependency_is_lazy() -> None:
+    """CLI startup loads Stamina only when the retry helper needs it."""
+    subprocess.run(
+        [
+            sys.executable,
+            '-c',
+            'import sys; import porringer.console.entry; '
+            'assert "stamina" not in sys.modules; '
+            'from porringer.utility import download; '
+            'download.stamina.retry_context; '
+            'assert "stamina" in sys.modules',
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+async def test_retry_recovers_from_transient_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A retryable network failure is followed by a successful attempt."""
+    result = DownloadResult(success=True, path=tmp_path / 'archive.bin')
+    outcomes = [aiohttp.ClientConnectionError('connection failed'), result]
+    attempt = AsyncMock(side_effect=outcomes)
+    monkeypatch.setattr(download_utility, '_download_attempt', attempt)
+    session = cast(aiohttp.ClientSession, _Session(_Response()))
+
+    actual = await download_utility._download_with_retries(session, _state(tmp_path), None)
+
+    assert actual is result
+    assert attempt.await_count == len(outcomes)
+
+
+async def test_retry_exhaustion_propagates_last_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Exhausting the retry policy preserves the final network exception."""
+    error = aiohttp.ClientConnectionError('connection failed')
+    attempt = AsyncMock(side_effect=error)
+    monkeypatch.setattr(download_utility, '_download_attempt', attempt)
+    session = cast(aiohttp.ClientSession, _Session(_Response()))
+
+    with pytest.raises(aiohttp.ClientConnectionError) as caught:
+        await download_utility._download_with_retries(session, _state(tmp_path), None)
+
+    assert caught.value is error
+    assert attempt.await_count == download_utility._DOWNLOAD_ATTEMPTS
+
+
+async def test_retry_does_not_repeat_http_client_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """HTTP client errors are not transient failures."""
+    error = aiohttp.ClientResponseError(cast(aiohttp.RequestInfo, None), (), status=404)
+    attempt = AsyncMock(side_effect=error)
+    monkeypatch.setattr(download_utility, '_download_attempt', attempt)
+    session = cast(aiohttp.ClientSession, _Session(_Response()))
+
+    with pytest.raises(aiohttp.ClientResponseError) as caught:
+        await download_utility._download_with_retries(session, _state(tmp_path), None)
+
+    assert caught.value is error
+    assert attempt.await_count == 1
+
+
+async def test_retry_does_not_repeat_cancellation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Task cancellation propagates without retrying the download."""
+    attempt = AsyncMock(side_effect=asyncio.CancelledError)
+    monkeypatch.setattr(download_utility, '_download_attempt', attempt)
+    session = cast(aiohttp.ClientSession, _Session(_Response()))
+
+    with pytest.raises(asyncio.CancelledError):
+        await download_utility._download_with_retries(session, _state(tmp_path), None)
+
+    assert attempt.await_count == 1
 
 
 class _Content:

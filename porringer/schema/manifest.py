@@ -7,15 +7,12 @@ from collections.abc import Iterator
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from pydantic import Field, HttpUrl, model_validator
 
 from porringer.core.schema import Ecosystem, PackageRef, PlatformScoped, PluginKind, PorringerModel
-
-if TYPE_CHECKING:
-    from porringer.utility.exception import ManifestValidationCode
-
+lazy from porringer.utility.exception import ManifestValidationCode
 
 MANIFEST_SCHEMA_URL = 'https://synodic.github.io/porringer/schema.json'
 """Canonical published URL (``$id``) for the porringer manifest JSON Schema."""

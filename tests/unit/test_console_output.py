@@ -3,9 +3,13 @@
 Tests for the themed console output facade.
 """
 
+import inspect
 import io
+from collections.abc import Generator
+from typing import get_type_hints
 
 from rich.console import Console
+from rich.status import Status
 
 from porringer.console.output import PORRINGER_THEME, Output, build_console, no_color_requested
 
@@ -21,6 +25,13 @@ def _make_output(*, quiet: bool = False) -> tuple[Output, io.StringIO, io.String
 
 class TestOutputRouting:
     """Verify which stream each helper writes to."""
+
+    @staticmethod
+    def test_status_annotation_resolves() -> None:
+        """Annotation-only imports remain available to runtime introspection."""
+        hints = get_type_hints(inspect.unwrap(Output.status))
+
+        assert hints['return'] == Generator[Status | None]
 
     @staticmethod
     def test_informational_helpers_write_to_stdout() -> None:

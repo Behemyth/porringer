@@ -9,11 +9,11 @@ import tempfile
 from pathlib import Path
 
 import pytest
-from pydantic import ValidationError
+from pydantic import Field, ValidationError
 
 from porringer.backend.command.manifest import find_manifest
 from porringer.backend.command.sync import SyncCommands
-from porringer.core.schema import Ecosystem
+from porringer.core.schema import Ecosystem, PorringerModel
 from porringer.schema import ManifestValidationCode, PackageSpec, SetupManifest
 from porringer.schema.manifest import MANIFEST_SCHEMA_DIALECT, MANIFEST_SCHEMA_URL
 from porringer.utility.exception import ManifestError
@@ -22,6 +22,35 @@ _PY = Ecosystem('python')
 
 TWO_PACKAGES = 2
 THREE_PACKAGES = 3
+
+
+class TestPorringerModel:
+    """Tests for shared model validation configuration."""
+
+    @staticmethod
+    def test_accepts_alias() -> None:
+        """Aliased fields accept their alias and preserve serialization names."""
+
+        class AliasedModel(PorringerModel):
+            value: str = Field(alias='external_value')
+
+        model = AliasedModel.model_validate({'external_value': 'accepted'})
+        assert model.value == 'accepted'
+        assert model.model_dump() == {'value': 'accepted'}
+        assert model.model_dump(by_alias=True) == {'external_value': 'accepted'}
+
+    @staticmethod
+    @pytest.mark.parametrize('extra_key', ['value', 'unexpected'])
+    def test_rejects_non_alias_keys(extra_key: str) -> None:
+        """Field names cannot bypass aliases, and unknown fields are forbidden."""
+
+        class AliasedModel(PorringerModel):
+            value: str = Field(alias='external_value')
+
+        with pytest.raises(ValidationError) as error:
+            AliasedModel.model_validate({'external_value': 'accepted', extra_key: 'rejected'})
+        assert error.value.errors()[0]['type'] == 'extra_forbidden'
+        assert error.value.errors()[0]['loc'] == (extra_key,)
 
 
 class TestPackageSpec:
@@ -185,11 +214,13 @@ class TestManifestSchema:
     @staticmethod
     def test_manifest_accepts_dollar_schema_field() -> None:
         """SetupManifest accepts $schema in input without raising ValidationError."""
-        manifest = SetupManifest.model_validate({
-            '$schema': MANIFEST_SCHEMA_URL,
-            'version': '1',
-            'packages': {'python': ['pytest']},
-        })
+        manifest = SetupManifest.model_validate(
+            {
+                '$schema': MANIFEST_SCHEMA_URL,
+                'version': '1',
+                'packages': {'python': ['pytest']},
+            }
+        )
 
         assert manifest.version == '1'
         assert len(manifest.packages) == 1
@@ -198,10 +229,12 @@ class TestManifestSchema:
     def test_manifest_rejects_unknown_extra_fields() -> None:
         """SetupManifest still rejects arbitrary unknown fields (extra='forbid')."""
         with pytest.raises(ValidationError):
-            SetupManifest.model_validate({
-                'version': '1',
-                'not_a_real_field': 'should fail',
-            })
+            SetupManifest.model_validate(
+                {
+                    'version': '1',
+                    'not_a_real_field': 'should fail',
+                }
+            )
 
 
 class TestPackageSpecExtras:

@@ -5,6 +5,8 @@ Test the click cli.
 
 import json
 import logging
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any, cast
 from unittest.mock import AsyncMock, patch
@@ -97,6 +99,33 @@ class TestCLI:
         result = runner.invoke(app, ['--version'], obj=test_config)
 
         assert result.exit_code == 0
+
+    @staticmethod
+    def test_doc_browser_import_is_lazy() -> None:
+        """The optional browser module loads only when first used in a fresh process."""
+        subprocess.run(
+            [
+                sys.executable,
+                '-c',
+                'import sys; import porringer.console.command.doc as doc; '
+                'assert "webbrowser" not in sys.modules; '
+                'assert callable(doc.webbrowser.open); '
+                'assert "webbrowser" in sys.modules',
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+    @staticmethod
+    @pytest.mark.parametrize('opened', [True, False])
+    def test_doc_open_browser(test_config, opened: bool) -> None:
+        """The optional browser command preserves success and failure reporting."""
+        with patch('porringer.console.command.doc.webbrowser.open', return_value=opened) as browser_open:
+            result = CliRunner().invoke(app, ['doc', '--open'], obj=test_config)
+
+        browser_open.assert_called_once_with('https://synodic.github.io/porringer/')
+        assert result.exit_code == (0 if opened else 1)
 
     @staticmethod
     def test_plugin_list_shows_output(test_config) -> None:

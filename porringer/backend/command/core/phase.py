@@ -13,13 +13,12 @@ The :func:`run_phases` driver replaces the hand-coded per-phase blocks in
 import asyncio
 import logging
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Protocol, override
+from typing import Protocol, override
 
 from porringer.core.schema import PluginKind
 from porringer.schema import SetupActionResult
 
-if TYPE_CHECKING:
-    from .execution import ExecutionState
+lazy from .execution import ExecutionState
 
 logger = logging.getLogger(__name__)
 

@@ -4,8 +4,8 @@ Porringer CLI doc command — resolve the documentation URL and optionally open 
 """
 
 import json
-import webbrowser
 from typing import Annotated
+lazy import webbrowser
 
 import typer
 

@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import aiohttp
-import stamina
+lazy import stamina
 
 from porringer.schema import (
     CancellationToken,
@@ -40,20 +40,22 @@ def _is_retryable_download_error(exc: Exception) -> bool:
     return isinstance(exc, (aiohttp.ClientError, OSError))
 
 
-@stamina.retry(
-    on=_is_retryable_download_error,
-    attempts=_DOWNLOAD_ATTEMPTS,
-    timeout=None,
-    wait_initial=1.0,
-    wait_jitter=0.0,
-)
 async def _download_with_retries(
     session: aiohttp.ClientSession,
     state: _DownloadState,
     cancellation_token: CancellationToken | None,
 ) -> DownloadResult:
-    """Run one download attempt under stamina's retry policy."""
-    return await _download_attempt(session, state, cancellation_token)
+    """Run download attempts under stamina's retry policy."""
+    async for attempt in stamina.retry_context(
+        on=_is_retryable_download_error,
+        attempts=_DOWNLOAD_ATTEMPTS,
+        timeout=None,
+        wait_initial=1.0,
+        wait_jitter=0.0,
+    ):
+        with attempt:
+            return await _download_attempt(session, state, cancellation_token)
+    raise RuntimeError('Download retry context exhausted without a result')
 
 
 @dataclass(slots=True)
