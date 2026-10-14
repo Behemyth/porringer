@@ -427,7 +427,7 @@ class Plugin(Protocol):
         """
         return []
 
-    async def setup(self) -> None:
+    async def setup(self) -> None:  # noqa: PLR6301
         """Plugin-level one-time native registration.
 
         Called by the framework **before** this plugin's first
@@ -451,8 +451,9 @@ class Plugin(Protocol):
 
         The default implementation is a no-op.
         """
+        return None
 
-    async def teardown(self) -> None:
+    async def teardown(self) -> None:  # noqa: PLR6301
         """Plugin-level cleanup that reverses what :meth:`setup` created.
 
         Called by the framework **after** this plugin's last
@@ -471,6 +472,7 @@ class Plugin(Protocol):
 
         The default implementation is a no-op.
         """
+        return None
 
     @property
     def distribution(self) -> Distribution:

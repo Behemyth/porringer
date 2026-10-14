@@ -933,7 +933,11 @@ def build_actions(
     # Stability preserves manifest-declared order within each kind, and
     # keeps explicit entries ahead of any synthesized action of the same
     # kind.
-    actions.sort(key=lambda a: _PHASE_ORDER_INDEX.get(a.kind, len(PHASE_ORDER)))
+    actions.sort(
+        key=lambda action: (
+            len(PHASE_ORDER) if action.kind is None else _PHASE_ORDER_INDEX.get(action.kind, len(PHASE_ORDER))
+        )
+    )
 
     return actions
 

@@ -214,13 +214,11 @@ class TestManifestSchema:
     @staticmethod
     def test_manifest_accepts_dollar_schema_field() -> None:
         """SetupManifest accepts $schema in input without raising ValidationError."""
-        manifest = SetupManifest.model_validate(
-            {
-                '$schema': MANIFEST_SCHEMA_URL,
-                'version': '1',
-                'packages': {'python': ['pytest']},
-            }
-        )
+        manifest = SetupManifest.model_validate({
+            '$schema': MANIFEST_SCHEMA_URL,
+            'version': '1',
+            'packages': {'python': ['pytest']},
+        })
 
         assert manifest.version == '1'
         assert len(manifest.packages) == 1
@@ -229,12 +227,10 @@ class TestManifestSchema:
     def test_manifest_rejects_unknown_extra_fields() -> None:
         """SetupManifest still rejects arbitrary unknown fields (extra='forbid')."""
         with pytest.raises(ValidationError):
-            SetupManifest.model_validate(
-                {
-                    'version': '1',
-                    'not_a_real_field': 'should fail',
-                }
-            )
+            SetupManifest.model_validate({
+                'version': '1',
+                'not_a_real_field': 'should fail',
+            })
 
 
 class TestPackageSpecExtras:

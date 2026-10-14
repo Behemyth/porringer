@@ -26,31 +26,29 @@ lazy from rich.status import Status
 
 # Named semantic styles shared by every CLI command. Keeping the colour
 # choices here means the whole CLI can be restyled in one place.
-PORRINGER_THEME = Theme(
-    {
-        'error': 'red',
-        'success': 'green',
-        'warning': 'yellow',
-        'info': 'cyan',
-        'muted': 'dim',
-        'detail': 'dim italic',
-        'heading': 'bold',
-        # Markdown-style inline code, e.g. for shell commands in the
-        # preview list. Underline + dim keeps it quiet relative to the
-        # bold action description, while still reading as visually
-        # distinct text (not just "normal" prose) at a glance.
-        'code': 'underline dim',
-        # Per-InspectionStatus styles for the preview/install action list.
-        # Keyed by InspectionStatus.value so renderers can look them up directly.
-        'status.satisfied': 'green',
-        'status.needed': 'yellow',
-        'status.update_available': 'cyan',
-        'status.unavailable': 'red',
-        'status.failed': 'bold red',
-        'status.skipped': 'dim',
-        'status.unknown': 'dim',
-    }
-)
+PORRINGER_THEME = Theme({
+    'error': 'red',
+    'success': 'green',
+    'warning': 'yellow',
+    'info': 'cyan',
+    'muted': 'dim',
+    'detail': 'dim italic',
+    'heading': 'bold',
+    # Markdown-style inline code, e.g. for shell commands in the
+    # preview list. Underline + dim keeps it quiet relative to the
+    # bold action description, while still reading as visually
+    # distinct text (not just "normal" prose) at a glance.
+    'code': 'underline dim',
+    # Per-InspectionStatus styles for the preview/install action list.
+    # Keyed by InspectionStatus.value so renderers can look them up directly.
+    'status.satisfied': 'green',
+    'status.needed': 'yellow',
+    'status.update_available': 'cyan',
+    'status.unavailable': 'red',
+    'status.failed': 'bold red',
+    'status.skipped': 'dim',
+    'status.unknown': 'dim',
+})
 
 
 def no_color_requested(explicit: bool = False) -> bool:
