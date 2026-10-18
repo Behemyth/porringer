@@ -6,7 +6,7 @@ This example bootstraps a Python development toolchain from an almost empty envi
 
 The manifest runs in ordered phases:
 
-1. `runtimes.python` installs Python 3.14 through `pim` on Windows or `pyenv` on macOS and Linux. The resolved interpreter path is passed to runtime-aware package and tool operations.
+1. `runtimes.python` installs Python 3.15 through `pim` on Windows or `pyenv` on macOS and Linux. The resolved interpreter path is passed to runtime-aware package and tool operations.
 2. `packages.python` installs `pipx` into the current Python environment through `pip` or `uv`.
 3. `tools.python` installs `pdm` as an isolated CLI tool through `pipx`. This backend may be deferred during preview because `pipx` is installed earlier in the same run.
 4. The `plugins` list runs `pdm self add cppython` through PDM's native plugin management.
@@ -15,7 +15,7 @@ The manifest runs in ordered phases:
 ## Manifest Overview
 
 ```text
-runtimes.python  ->  pim / pyenv   ->  Python 3.14
+runtimes.python  ->  pim / pyenv   ->  Python 3.15
 packages.python  ->  pip / uv      ->  pipx
 tools.python     ->  pipx          ->  pdm          (deferred resolution)
                  ->  pdm self add  ->  cppython     (native plugin management)
