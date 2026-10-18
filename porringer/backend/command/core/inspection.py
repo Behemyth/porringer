@@ -4,17 +4,22 @@ Build structured inspection reports for manifest previews.
 """
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 import aiohttp
 
 from porringer.backend.command.core.action_builder import get_cli_steps
 from porringer.backend.command.core.discovery import DiscoveredPlugins
-from porringer.backend.command.core.execution import determine_fallback_dir, discovered_plugin_entries
+from porringer.backend.command.core.execution import (
+    determine_fallback_dir,
+    discovered_plugin_entries,
+)
 from porringer.backend.command.core.presence import inspect_action
 from porringer.backend.command.core.resolution import PackageCache, ResolutionContext
 from porringer.core.schema import PluginKind
 from porringer.schema import (
+    ActionInspectedEvent,
     ActionInspection,
     ActionRef,
     ActionSnapshot,
@@ -36,8 +41,15 @@ from porringer.schema import (
     SyncInspectionReport,
 )
 from porringer.utility import HTTP_TIMEOUT
-from porringer.utility.observability import inspection_diagnostics, inspection_follow_up_actions, result_status
+from porringer.utility.observability import (
+    inspection_diagnostics,
+    inspection_follow_up_actions,
+    result_status,
+)
 from porringer.utility.trace import TraceContext, use_trace_context
+
+type InspectedCallback = Callable[[ActionInspectedEvent], Awaitable[None]]
+"""Awaited with each action as soon as its inspection finishes."""
 
 
 def action_snapshot(action: SetupAction, index: int, *, ref: ActionRef | None = None) -> ActionSnapshot:
@@ -59,6 +71,7 @@ def action_snapshot(action: SetupAction, index: int, *, ref: ActionRef | None = 
         package_description=action.package_description,
         include_prereleases=action.include_prereleases,
         runtime_tag=action.runtime_tag,
+        entry_id=action.entry_id,
     )
 
 
@@ -81,7 +94,9 @@ def action_trace_context(mode: str, action: SetupAction, ref: ActionRef) -> Trac
     )
 
 
-def metadata_snapshot(metadata: ManifestMetadata | None) -> ManifestMetadataSnapshot | None:
+def metadata_snapshot(
+    metadata: ManifestMetadata | None,
+) -> ManifestMetadataSnapshot | None:
     """Project manifest metadata into a JSON-stable snapshot."""
     if metadata is None:
         return None
@@ -103,7 +118,9 @@ def diagnostic_snapshot(diagnostic: ManifestDiagnostic) -> ManifestDiagnosticSna
     )
 
 
-def plugin_snapshots(plugins: DiscoveredPlugins) -> tuple[DiscoveredPluginSnapshot, ...]:
+def plugin_snapshots(
+    plugins: DiscoveredPlugins,
+) -> tuple[DiscoveredPluginSnapshot, ...]:
     """Return JSON-stable plugin availability entries."""
     runtime_context = plugins.runtime_context
     return tuple(
@@ -264,29 +281,51 @@ def _inspection_from_result(
     )
 
 
+def _inspected_event(
+    action: SetupAction, result: SetupActionResult, inspection: ActionInspection
+) -> ActionInspectedEvent:
+    """Build the event for one finished check, with the result carrying the inspection's ref and commands."""
+    result.ref = inspection.ref
+    if result.cli_command is None:
+        result.cli_command = inspection.cli_command or None
+    if result.cli_steps is None:
+        result.cli_steps = inspection.cli_steps or None
+    return ActionInspectedEvent(action=action, result=result, inspection=inspection)
+
+
 async def inspect_actions(
     preview: SetupResults,
     plugins: DiscoveredPlugins,
     parameters: SetupParameters,
     *,
     manifest_index: int = 0,
+    on_inspected: InspectedCallback | None = None,
 ) -> tuple[ActionInspection, ...]:
-    """Inspect every action in a manifest preview."""
+    """Inspect every action in a manifest preview.
+
+    *on_inspected* is awaited with each action as soon as its checks
+    finish: in source order for FAST inspection, in completion order
+    otherwise. The returned tuple is always in source order.
+    """
     assert preview.root_directory is not None
 
     if parameters.inspection_mode == InspectionMode.FAST:
         source_indices = action_source_indices(preview)
-        return tuple(
-            _inspection_from_result(
+        inspections: list[ActionInspection] = []
+        for display_index, (source_index, action) in enumerate(zip(source_indices, preview.actions, strict=True)):
+            result = _fast_inspect_result(action, plugins, parameters)
+            inspection = _inspection_from_result(
                 index=display_index,
                 ref=ActionRef.from_indices(manifest_index, source_index),
                 action=action,
-                result=_fast_inspect_result(action, plugins, parameters),
+                result=result,
                 plugins=plugins,
                 parameters=parameters,
             )
-            for display_index, (source_index, action) in enumerate(zip(source_indices, preview.actions, strict=True))
-        )
+            inspections.append(inspection)
+            if on_inspected is not None:
+                await on_inspected(_inspected_event(action, result, inspection))
+        return tuple(inspections)
 
     working_dir = determine_fallback_dir(parameters, preview.root_directory)
     runtime_context = plugins.runtime_context
@@ -306,7 +345,12 @@ async def inspect_actions(
             next_index += 1
             return index, source_indices[index], preview.actions[index]
 
-    async def _run(index: int, source_index: int, action: SetupAction, client: aiohttp.ClientSession) -> None:
+    async def _run(
+        index: int,
+        source_index: int,
+        action: SetupAction,
+        client: aiohttp.ClientSession,
+    ) -> None:
         ref = ActionRef.from_indices(manifest_index, source_index)
         context = ResolutionContext(
             project_environments=plugins.project_environments,
@@ -319,7 +363,7 @@ async def inspect_actions(
                 result = await _inspect_result(action, plugins, parameters, context, working_dir)
         except Exception as exc:
             result = SetupActionResult(action=action, success=False, message=str(exc))
-        slots[index] = _inspection_from_result(
+        inspection = _inspection_from_result(
             index=index,
             ref=ref,
             action=action,
@@ -327,13 +371,19 @@ async def inspect_actions(
             plugins=plugins,
             parameters=parameters,
         )
+        slots[index] = inspection
+        if on_inspected is not None:
+            await on_inspected(_inspected_event(action, result, inspection))
 
     async def _worker(client: aiohttp.ClientSession) -> None:
         while (item := await _next_action()) is not None:
             index, source_index, action = item
             await _run(index, source_index, action, client)
 
-    async with aiohttp.ClientSession(timeout=HTTP_TIMEOUT) as shared_client, asyncio.TaskGroup() as task_group:
+    async with (
+        aiohttp.ClientSession(timeout=HTTP_TIMEOUT) as shared_client,
+        asyncio.TaskGroup() as task_group,
+    ):
         worker_count = len(preview.actions) if max_concurrency <= 0 else min(max_concurrency, len(preview.actions))
         for _ in range(worker_count):
             task_group.create_task(_worker(shared_client))
@@ -370,9 +420,10 @@ async def build_manifest_inspection(
     plugins: DiscoveredPlugins,
     parameters: SetupParameters,
     diagnostics: tuple[ManifestDiagnostic, ...],
+    on_inspected: InspectedCallback | None = None,
 ) -> ManifestInspection:
     """Build an inspection report for a loaded manifest preview."""
-    actions = await inspect_actions(preview, plugins, parameters, manifest_index=index)
+    actions = await inspect_actions(preview, plugins, parameters, manifest_index=index, on_inspected=on_inspected)
     return ManifestInspection(
         index=index,
         manifest_path=preview.manifest_path,

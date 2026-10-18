@@ -39,6 +39,7 @@ from porringer.schema import (
     SetupAction,
     SetupActionResult,
     SetupParameters,
+    SyncPlan,
     SyncStrategy,
     progress_event_snapshot,
 )
@@ -117,9 +118,17 @@ class _ProgressTracker:
             task_id = self.state.active_tasks.pop(action_key)
             if result and result.success:
                 if result.skipped:
-                    self.progress.update(task_id, description=f'  [dim]{action_desc} (skipped)[/dim]', completed=1)
+                    self.progress.update(
+                        task_id,
+                        description=f'  [dim]{action_desc} (skipped)[/dim]',
+                        completed=1,
+                    )
                 else:
-                    self.progress.update(task_id, description=f'  [green]{action_desc}[/green]', completed=1)
+                    self.progress.update(
+                        task_id,
+                        description=f'  [green]{action_desc}[/green]',
+                        completed=1,
+                    )
             else:
                 self.progress.update(task_id, description=f'  [red]{action_desc}[/red]', completed=1)
 
@@ -188,7 +197,8 @@ class _ProgressTracker:
                 self.progress.update(self.state.overall_task, total=self.state.total_actions)
             elif self.state.total_actions > 0:
                 self.state.overall_task = self.progress.add_task(
-                    _progress_label(self.setup_params.strategy), total=self.state.total_actions
+                    _progress_label(self.setup_params.strategy),
+                    total=self.state.total_actions,
                 )
             return
         if isinstance(event, ManifestFailedEvent):
@@ -376,8 +386,12 @@ def _execute_observable(
     api: API,
     emit_jsonl: bool,
     record_path: Path | None,
+    plan: SyncPlan | None = None,
 ) -> BatchSetupResults:
-    """Execute setup while optionally emitting JSONL and a replay record."""
+    """Execute setup while optionally emitting JSONL and a replay record.
+
+    Runs *plan* when given, otherwise loads *setup_params* afresh.
+    """
     correlation_id = str(uuid4())
     started_at = datetime.now(UTC)
     event_payloads: list[dict] = []
@@ -389,7 +403,8 @@ def _execute_observable(
         if emit_jsonl:
             _dump_json_line(payload)
 
-    report = asyncio.run(api.sync.run(setup_params, on_event=_on_event))
+    run = api.sync.run(plan=plan, on_event=_on_event) if plan else api.sync.run(setup_params, on_event=_on_event)
+    report = asyncio.run(run)
     batch = report.results
     ended_at = datetime.now(UTC)
     envelope = batch_envelope(
@@ -422,6 +437,7 @@ def _execute_with_progress(
     configuration: ConsoleConfiguration,
     api: API,
     setup_params: SetupParameters,
+    plan: SyncPlan | None = None,
 ) -> BatchSetupResults:
     """Execute installation with progress display.
 
@@ -433,6 +449,7 @@ def _execute_with_progress(
         configuration: CLI configuration with console.
         api: The API instance.
         setup_params: Setup parameters.
+        plan: A confirmed plan to run instead of loading *setup_params* afresh.
 
     Returns:
         BatchSetupResults from execution.
@@ -449,8 +466,10 @@ def _execute_with_progress(
         transient=True,
     ) as progress:
         tracker = _ProgressTracker(progress=progress, setup_params=setup_params, state=state)
+        handler = tracker.handle_progress_event
+        run = api.sync.run(plan=plan, on_event=handler) if plan else api.sync.run(setup_params, on_event=handler)
         try:
-            return asyncio.run(api.sync.run(setup_params, on_event=tracker.handle_progress_event)).results
+            return asyncio.run(run).results
         except KeyboardInterrupt:
             configuration.output.warning('Cancelled. The active command was stopped.')
             raise typer.Exit(1) from None

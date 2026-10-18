@@ -16,7 +16,6 @@ import aiohttp
 lazy import stamina
 
 from porringer.schema import (
-    CancellationToken,
     DownloadParameters,
     DownloadResult,
     HashAlgorithm,
@@ -43,7 +42,6 @@ def _is_retryable_download_error(exc: Exception) -> bool:
 async def _download_with_retries(
     session: aiohttp.ClientSession,
     state: _DownloadState,
-    cancellation_token: CancellationToken | None,
 ) -> DownloadResult:
     """Run download attempts under stamina's retry policy."""
     async for attempt in stamina.retry_context(
@@ -54,7 +52,7 @@ async def _download_with_retries(
         wait_jitter=0.0,
     ):
         with attempt:
-            return await _download_attempt(session, state, cancellation_token)
+            return await _download_attempt(session, state)
     raise RuntimeError('Download retry context exhausted without a result')
 
 
@@ -185,7 +183,6 @@ def _verify_download(
 async def _download_attempt(
     session: aiohttp.ClientSession,
     state: _DownloadState,
-    cancellation_token: CancellationToken | None,
 ) -> DownloadResult:
     """Execute a single async download attempt.
 
@@ -195,7 +192,6 @@ async def _download_attempt(
     Args:
         session: Shared aiohttp session.
         state: Download state.
-        cancellation_token: Optional cancellation token.
 
     Returns:
         DownloadResult.
@@ -221,7 +217,7 @@ async def _download_attempt(
             os.close(temp_fd)
             raise
 
-        result = await _perform_download(session, file_handle, state, cancellation_token)
+        result = await _perform_download(session, file_handle, state)
 
         if result.success:
             temp_path.replace(state.parameters.destination)
@@ -243,7 +239,6 @@ async def _download_attempt(
 async def download_file(
     parameters: DownloadParameters,
     progress_callback: ProgressCallback | None = None,
-    cancellation_token: CancellationToken | None = None,
     *,
     http_client: aiohttp.ClientSession | None = None,
 ) -> DownloadResult:
@@ -262,7 +257,6 @@ async def download_file(
     Args:
         parameters: Download parameters.
         progress_callback: Optional callback for progress updates (downloaded, total).
-        cancellation_token: Optional token for cooperative cancellation.
         http_client: Optional shared ``aiohttp.ClientSession`` for connection
             pooling across multiple downloads.  When ``None`` a temporary
             session is created for this single download.
@@ -271,12 +265,9 @@ async def download_file(
         DownloadResult with success status and details.
 
     Raises:
-        asyncio.CancelledError: If cancellation_token is cancelled.
+        asyncio.CancelledError: If the calling task is cancelled.
     """
     logger.info(f'Downloading (async): {parameters.url}')
-
-    if cancellation_token is not None:
-        cancellation_token.raise_if_cancelled()
 
     try:
         expected_algorithm, expected_digest = _parse_and_validate_hash(parameters.expected_hash)
@@ -296,12 +287,15 @@ async def download_file(
         contextlib.nullcontext(http_client) if http_client is not None else aiohttp.ClientSession(timeout=HTTP_TIMEOUT)
     ) as session:
         try:
-            return await _download_with_retries(session, state, cancellation_token)
+            return await _download_with_retries(session, state)
         except asyncio.CancelledError:
             logger.info('Download cancelled')
             raise
         except TimeoutError:
-            return DownloadResult(success=False, message=f'Download timed out after {parameters.timeout} seconds')
+            return DownloadResult(
+                success=False,
+                message=f'Download timed out after {parameters.timeout} seconds',
+            )
         except aiohttp.ClientResponseError as e:
             logger.error(f'HTTP error: {e}')
             return DownloadResult(success=False, message=str(e))
@@ -317,7 +311,6 @@ async def _perform_download(
     session: aiohttp.ClientSession,
     file_handle: Any,
     state: _DownloadState,
-    cancellation_token: CancellationToken | None,
 ) -> DownloadResult:
     """Perform async download with aiohttp.
 
@@ -325,7 +318,6 @@ async def _perform_download(
         session: Shared aiohttp session.
         file_handle: Open temporary file owned by this function.
         state: Download state with parameters and callbacks.
-        cancellation_token: Optional cancellation token.
 
     Returns:
         DownloadResult.
@@ -358,9 +350,6 @@ async def _perform_download(
                 )
 
             async for chunk in response.content.iter_chunked(state.parameters.chunk_size):
-                if cancellation_token is not None:
-                    cancellation_token.raise_if_cancelled()
-
                 await _write_chunk(file_handle, chunk)
                 downloaded += len(chunk)
 
@@ -379,7 +368,12 @@ async def _perform_download(
     if error:
         return error
 
-    return DownloadResult(success=True, path=state.parameters.destination, verified=bool(hasher), size=downloaded)
+    return DownloadResult(
+        success=True,
+        path=state.parameters.destination,
+        verified=bool(hasher),
+        size=downloaded,
+    )
 
 
 async def _write_chunk(file_handle: Any, chunk: bytes) -> None:

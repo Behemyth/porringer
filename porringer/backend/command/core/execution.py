@@ -21,6 +21,7 @@ from typing import cast
 import aiohttp
 
 from porringer.backend.backend import BackendResolver
+from porringer.backend.builder import Builder
 from porringer.core.path import ensure_system_path, reset_sync_state
 from porringer.core.plugin_schema.environment import Environment, PackageParameters
 from porringer.core.plugin_schema.project_environment import (
@@ -56,7 +57,11 @@ from porringer.schema import (
 from porringer.schema.progress import DiscoveredPluginEntry
 from porringer.utility import HTTP_TIMEOUT
 from porringer.utility.exception import PluginError
-from porringer.utility.trace import TraceContext, current_trace_context, use_trace_context
+from porringer.utility.trace import (
+    TraceContext,
+    current_trace_context,
+    use_trace_context,
+)
 from porringer.utility.utility import CommandProgress, run_command
 
 from .action_builder import (
@@ -75,7 +80,9 @@ from .presence import clone_status_to_result
 from .resolution import (
     PackageCache,
     ResolutionContext,
+    apply_runtime_tag,
     resolve_operation,
+    resolve_uninstall_operation,
     resolved_to_result,
 )
 
@@ -432,7 +439,7 @@ def _prepend_to_path(dirs: list[str], *, require_exists: bool = False) -> None:
 
     Mutations are **process-global** by design — ``shutil.which()``
     and ``asyncio.create_subprocess_exec()`` inherit the process
-    environment, so every concurrent ``execute_single()`` run
+    environment, so every concurrent ``execute_manifest()`` run
     benefits from directories added by earlier runtime resolution.
     Additions are idempotent and append-only (directories already
     present are skipped).
@@ -509,33 +516,6 @@ def inject_runtime_path(executable: Path) -> None:
 # ---------------------------------------------------------------------------
 # Package execution helpers
 # ---------------------------------------------------------------------------
-
-
-async def resolve_runtime_tag_override(
-    tag: str,
-    ecosystem: str | None,
-    environments: dict[str, Environment],
-) -> RuntimeContext | None:
-    """Build a one-off :class:`RuntimeContext` for a specific *tag*.
-
-    Scans *environments* for a :class:`RuntimeProvider` whose
-    ``provided_runtime_kind()`` matches *ecosystem*, then resolves
-    *tag* to a concrete executable path.
-
-    Returns ``None`` when no matching provider exists or when the tag
-    cannot be resolved to an executable.
-    """
-    if ecosystem is None:
-        return None
-
-    for env in environments.values():
-        if isinstance(env, RuntimeProvider) and env.provided_runtime_kind() == ecosystem:
-            executable = await env.resolve_executable(tag)
-            if executable is not None:
-                return RuntimeContext(executables={ecosystem: executable})
-            return None
-
-    return None
 
 
 def forward_version_metadata(result: SetupActionResult, operation: Operation) -> None:
@@ -638,16 +618,10 @@ async def execute_package(
 
     environments, ctx = _prepare_action_context(action, environments, context, package_cache)
 
-    # Apply any per-action runtime override before resolving the operation.
-    if action.runtime_tag is not None:
-        override_ctx = await resolve_runtime_tag_override(action.runtime_tag, action.ecosystem, environments)
-        if override_ctx is None:
-            return SetupActionResult(
-                action=action,
-                success=False,
-                message=(f"Could not resolve runtime tag '{action.runtime_tag}' for ecosystem '{action.ecosystem}'"),
-            )
-        ctx = replace(ctx, runtime_context=override_ctx)
+    ctx_or_failure = await apply_runtime_tag(action, environments, ctx)
+    if isinstance(ctx_or_failure, SetupActionResult):
+        return ctx_or_failure
+    ctx = ctx_or_failure
 
     resolved = await resolve_operation(
         action,
@@ -676,10 +650,88 @@ async def execute_package(
             verb = 'Upgrading'
     logger.info(f"{verb} '{action.package}' via {action.installer}")
     result = await _attempt_package_operation(
-        action, environment, resolved.operation, event_queue, runtime_context=ctx.runtime_context
+        action,
+        environment,
+        resolved.operation,
+        event_queue,
+        runtime_context=ctx.runtime_context,
     )
     forward_version_metadata(result, resolved.operation)
     invalidate_runtime_cache_after_mutation(action, environments, result)
+    return result
+
+
+async def execute_uninstall(
+    action: SetupAction,
+    environments: dict[str, Environment],
+    event_queue: asyncio.Queue[ProgressEvent | None],
+    context: ResolutionContext | None = None,
+    *,
+    teardown_complete: set[str] | None = None,
+) -> SetupActionResult:
+    """Uninstall *action*'s package when it is present.
+
+    After a successful uninstall, the plugin's ``teardown()`` runs once
+    per run when it reports no remaining packages.
+
+    Args:
+        action: The package action describing what to remove.
+        environments: Dict of instantiated environment plugins.
+        event_queue: Queue to emit action progress events into.
+        context: Optional resolution context.
+        teardown_complete: Installer names already torn down in this run.
+
+    Returns:
+        The result of the operation.
+    """
+    if action.installer is None or action.package is None:
+        return SetupActionResult(action=action, success=False, message='Installer or package not specified')
+
+    environment = environments.get(action.installer)
+    if environment is None:
+        return SetupActionResult(
+            action=action,
+            success=False,
+            message=f"Installer '{action.installer}' is not available",
+        )
+
+    ctx_or_failure = await apply_runtime_tag(action, environments, context or ResolutionContext())
+    if isinstance(ctx_or_failure, SetupActionResult):
+        return ctx_or_failure
+    ctx = ctx_or_failure
+
+    try:
+        resolved = await resolve_uninstall_operation(action, environment, ctx)
+    except Exception as e:
+        return SetupActionResult(
+            action=action,
+            success=False,
+            message=f'Could not query installed packages: {e}',
+        )
+
+    if isinstance(resolved.operation, Skip):
+        logger.info("Skipping uninstall of '%s': %s", action.package, resolved.message)
+        return resolved_to_result(resolved)
+
+    logger.info("Uninstalling '%s' via %s", action.package, action.installer)
+    result = await _attempt_operation(
+        action,
+        spec=OperationSpec(execute=environment.uninstall, verb='uninstall', verb_past='Uninstalled'),
+        event_queue=event_queue,
+        runtime_context=ctx.runtime_context,
+    )
+    forward_version_metadata(result, resolved.operation)
+    invalidate_runtime_cache_after_mutation(action, environments, result)
+
+    if result.success and (teardown_complete is None or action.installer not in teardown_complete):
+        try:
+            if not await environment.packages(runtime_context=ctx.runtime_context):
+                if teardown_complete is not None:
+                    teardown_complete.add(action.installer)
+                await environment.teardown()
+        except Exception:
+            logger.warning("teardown() failed for plugin '%s'", action.installer, exc_info=True)
+
     return result
 
 
@@ -993,9 +1045,15 @@ async def _run_parallel_packages(
         # the caller's cancellation semantics are preserved.
         cancellations, unexpected = eg.split(asyncio.CancelledError)
         if unexpected is not None:
-            logger.error('Parallel package operation failed with exceptions: %s', unexpected.exceptions)
+            logger.error(
+                'Parallel package operation failed with exceptions: %s',
+                unexpected.exceptions,
+            )
         if cancellations is not None:
-            logger.warning('Parallel package operation cancelled (%d task(s))', len(cancellations.exceptions))
+            logger.warning(
+                'Parallel package operation cancelled (%d task(s))',
+                len(cancellations.exceptions),
+            )
             raise cancellations from None
 
     # Convert dict to ordered list
@@ -1123,7 +1181,7 @@ def _plugins_discovered_event(
     return PluginsDiscoveredEvent(discovered_plugins=discovered)
 
 
-async def execute_single(
+async def execute_manifest(
     preview: SetupResults,
     parameters: SetupParameters,
     event_queue: asyncio.Queue[ProgressEvent | None],
@@ -1131,7 +1189,7 @@ async def execute_single(
     plugins: DiscoveredPlugins | None = None,
     manifest_index: int = 0,
 ) -> SetupResults:
-    """Execute setup actions for a single path with parallel support.
+    """Execute one manifest's setup actions, phase by phase.
 
     Execution is **phased** so that each layer's prerequisite tools
     are available before they are needed:
@@ -1224,6 +1282,82 @@ async def execute_single(
         root_directory=state.manifest_directory,
         metadata=state.metadata,
         preferences=state.preview.preferences,
+    )
+
+
+async def uninstall_manifest(
+    preview: SetupResults,
+    parameters: SetupParameters,
+    event_queue: asyncio.Queue[ProgressEvent | None],
+    *,
+    plugins: DiscoveredPlugins | None = None,
+    manifest_index: int = 0,
+) -> SetupResults:
+    """Uninstall one manifest's package actions in reverse phase order.
+
+    Tools go before the packages and runtimes they may depend on.  The
+    preview's actions are re-described with an ``Uninstall`` verb.
+    """
+    if plugins is None:
+        invalidate_plugin_cache()
+        plugins = discover_all_plugins()
+        event_queue.put_nowait(_plugins_discovered_event(plugins))
+    plugins = plugins.copy()
+
+    runtime_context = plugins.runtime_context
+    if runtime_context is None:
+        runtime_context = await Builder.resolve_runtime_context(plugins.environments)
+
+    actions = list(preview.actions)
+    resolve_deferred_actions(
+        actions,
+        plugins,
+        preferences=dict(preview.preferences),
+        runtime_context=runtime_context,
+    )
+    preview.actions = [
+        replace(
+            action,
+            description=action_description(action.kind, 'Uninstall', action.installer, package=action.package),
+        )
+        if action.kind is not None
+        else action
+        for action in actions
+    ]
+    source_indices = preview.action_indices
+    if len(source_indices) != len(preview.actions):
+        source_indices = list(range(len(preview.actions)))
+
+    event_queue.put_nowait(ManifestLoadedEvent(manifest=preview, manifest_index=manifest_index))
+
+    ctx = ResolutionContext(runtime_context=runtime_context)
+    teardown_complete: set[str] = set()
+    results: list[SetupActionResult] = []
+    for action, source_index in reversed(list(zip(preview.actions, source_indices, strict=True))):
+        ref = ActionRef.from_indices(manifest_index, source_index)
+        started_at = _emit_started(action, ref, event_queue)
+        with use_trace_context(_action_trace_context('execute', action, ref, operation='uninstall')):
+            result = await execute_uninstall(
+                action,
+                plugins.environments,
+                event_queue,
+                ctx,
+                teardown_complete=teardown_complete,
+            )
+        results.append(result)
+        _emit_completed(action, result, ref, event_queue, started_at)
+        if not result.success and not result.skipped and parameters.fail_fast:
+            break
+
+    return SetupResults(
+        actions=preview.actions,
+        action_indices=preview.action_indices,
+        results=results,
+        manifest_index=manifest_index,
+        manifest_path=preview.manifest_path,
+        root_directory=preview.root_directory,
+        metadata=preview.metadata,
+        preferences=preview.preferences,
     )
 
 
@@ -1342,7 +1476,10 @@ def resolve_deferred_actions(
     # probed against the target interpreter, not just the host PATH.
     needed_pairs = {(a.kind, a.ecosystem) for a in deferred if a.kind is not None and a.ecosystem is not None}
     resolver = BackendResolver(
-        plugins.all_plugins, preferences, runtime_context=runtime_context, needed_pairs=needed_pairs
+        plugins.all_plugins,
+        preferences,
+        runtime_context=runtime_context,
+        needed_pairs=needed_pairs,
     )
     verb = STRATEGY_VERB[strategy]
 

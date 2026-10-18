@@ -14,9 +14,9 @@ from porringer.schema import ActionProgress, SetupAction
 from porringer.utility.trace import CommandTrace
 
 __all__ = [
-    'CommandResult',
-    'CommandProgress',
     'DEFAULT_COMMAND_OUTPUT_TAIL_LINES',
+    'CommandProgress',
+    'CommandResult',
     'run_command',
 ]
 
@@ -120,6 +120,8 @@ async def run_command(
     try:
         process = await asyncio.create_subprocess_exec(
             *args,
+            # Output is captured, so a prompt would be invisible; reading input must fail instead of hanging.
+            stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=cwd,

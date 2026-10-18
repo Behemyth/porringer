@@ -8,6 +8,7 @@ from typing import LiteralString
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from rich.console import Console
 
+from porringer.backend.schema import GlobalConfiguration
 from porringer.console.output import PORRINGER_THEME, Output, build_console
 from porringer.schema import LocalConfiguration
 
@@ -39,6 +40,7 @@ class ConsoleConfiguration(BaseModel):
     console: Console = Field(default_factory=build_console)
     error_console: Console = Field(default_factory=lambda: build_console(stderr=True))
     local_configuration: LocalConfiguration = LocalConfiguration()
+    global_configuration: GlobalConfiguration = GlobalConfiguration()
     debug: bool = False
     verbosity: int = 0
     quiet: bool = False

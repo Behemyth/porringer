@@ -15,6 +15,7 @@ from rich.panel import Panel
 
 from porringer.console.common import (
     EXIT_FAILURE,
+    GlobalOption,
     OnlyActionOption,
     PluginOption,
     ProjectDirOption,
@@ -23,6 +24,7 @@ from porringer.console.common import (
     build_setup_parameters,
     classify_target,
     create_api,
+    global_manifest_or_exit,
     parse_shared_options,
     resolve_target_or_exit,
 )
@@ -34,7 +36,10 @@ from porringer.schema import (
     SyncInspectionReport,
     SyncStrategy,
 )
-from porringer.utility.observability import explain_inspection_report, inspection_envelope
+from porringer.utility.observability import (
+    explain_inspection_report,
+    inspection_envelope,
+)
 
 
 @dataclass(slots=True)
@@ -44,7 +49,7 @@ class _PreviewOptions:
     strategy: SyncStrategy = SyncStrategy.MINIMAL
     inspection_mode: InspectionMode = InspectionMode.COMPLETE
     project_directory: Path | None = None
-    plugins: set[str] | None = None
+    plugin_names: set[str] | None = None
     action_ids: set[str] | None = None
     as_json: bool = False
     as_envelope: bool = False
@@ -215,7 +220,11 @@ def _display_report(
     )
 
 
-def _emit_report(configuration: ConsoleConfiguration, report: SyncInspectionReport, options: _PreviewOptions) -> None:
+def _emit_report(
+    configuration: ConsoleConfiguration,
+    report: SyncInspectionReport,
+    options: _PreviewOptions,
+) -> None:
     """Emit an inspection report in the requested format."""
     if options.as_envelope:
         envelope = inspection_envelope(report, operation='sync.inspect')
@@ -292,36 +301,53 @@ def preview_default(  # noqa: PLR0913
         typer.Option('--explain', help='Explain diagnostics and available follow-up actions'),
     ] = False,
     only_action: OnlyActionOption = None,
+    global_: GlobalOption = False,
 ) -> None:
     """Preview what Porringer would do, without executing any actions."""
     configuration = context.ensure_object(ConsoleConfiguration)
     shared = parse_shared_options(
-        configuration, strategy=strategy, project_dir=project_dir, plugin=plugin, only_action=only_action
+        configuration,
+        strategy=strategy,
+        project_dir=project_dir,
+        plugin=plugin,
+        only_action=only_action,
     )
     options = _PreviewOptions(
         strategy=shared.strategy,
         inspection_mode=_parse_inspection_mode(configuration, mode),
         project_directory=shared.project_directory,
-        plugins=shared.plugins,
+        plugin_names=shared.plugin_names,
         action_ids=shared.action_ids,
         as_json=as_json,
         as_envelope=as_envelope,
         explain=explain,
     )
 
-    resolved_target = resolve_target_or_exit(configuration, target)
-    api = create_api(configuration)
-    plan = classify_target(configuration, api, resolved_target)
+    if global_:
+        api = create_api(configuration)
+        manifest_paths: Path | list[str] | None = global_manifest_or_exit(
+            configuration, api, target=target, project_dir=project_dir
+        )
+    else:
+        resolved_target = resolve_target_or_exit(configuration, target)
+        api = create_api(configuration)
+        plan = classify_target(configuration, api, resolved_target)
 
-    if plan.is_profile and plan.profile_url is not None:
-        preview_profile(configuration, plan.profile_url, options, expected_hash=plan.expected_hash)
-        return
+        if plan.is_profile and plan.profile_url is not None:
+            preview_profile(
+                configuration,
+                plan.profile_url,
+                options,
+                expected_hash=plan.expected_hash,
+            )
+            return
+        manifest_paths = plan.manifest_paths
 
     params = build_setup_parameters(
-        plan.manifest_paths,
+        manifest_paths,
         project_directory=options.project_directory,
         strategy=options.strategy,
-        plugins=options.plugins,
+        plugin_names=options.plugin_names,
         action_ids=options.action_ids,
         inspection_mode=options.inspection_mode,
         fail_fast=False,

@@ -15,6 +15,7 @@ from porringer.console.command import sync as sync_command
 from porringer.console.command.preview import _display_report
 from porringer.console.common import (
     EXIT_FAILURE,
+    GlobalOption,
     OnlyActionOption,
     PluginOption,
     ProjectDirOption,
@@ -25,11 +26,13 @@ from porringer.console.common import (
     classify_target,
     confirm_or_abort,
     create_api,
+    global_manifest_or_exit,
     parse_shared_options,
     resolve_target_or_exit,
 )
 from porringer.console.schema import ConsoleConfiguration
-from porringer.schema import InspectionMode, SyncStrategy
+from porringer.schema import InspectionMode, SyncPlan, SyncStrategy
+from porringer.utility.exception import PlanStaleError
 
 
 @dataclass(slots=True)
@@ -39,7 +42,7 @@ class _InstallOptions:
     project_directory: Path | None = None
     fail_fast: bool = True
     strategy: SyncStrategy = SyncStrategy.MINIMAL
-    plugins: set[str] | None = None
+    plugin_names: set[str] | None = None
     action_ids: set[str] | None = None
     as_jsonl: bool = False
     record_path: Path | None = None
@@ -62,32 +65,43 @@ def _run_manifest_install(
         paths,
         project_directory=options.project_directory,
         strategy=options.strategy,
-        plugins=options.plugins,
+        plugin_names=options.plugin_names,
         action_ids=options.action_ids,
         fail_fast=options.fail_fast,
     )
 
     # JSONL output must stay machine-clean, so the human preview is skipped there.
+    plan: SyncPlan | None = None
     if not options.as_jsonl:
         # Force COMPLETE inspection for the human preview regardless of what
         # setup_params carries. A confirmation prompt must show real
         # presence/update statuses, never FAST's unprobed placeholders.
         preview_params = setup_params.model_copy(update={'inspection_mode': InspectionMode.COMPLETE})
         with configuration.output.status('Inspecting...'):
-            report = asyncio.run(api.sync.inspect(preview_params))
-        _display_report(configuration, report, compact=True)
+            plan = asyncio.run(api.sync.plan(preview_params))
+        _display_report(configuration, plan.report, compact=True)
 
-    _confirm_or_abort(configuration, options.yes)
+    try:
+        _confirm_or_abort(configuration, options.yes)
+    except BaseException:
+        if plan is not None:
+            plan.discard()
+        raise
 
-    if options.as_jsonl or options.record_path is not None:
-        execute_results = sync_command._execute_observable(
-            setup_params,
-            api=api,
-            emit_jsonl=options.as_jsonl,
-            record_path=options.record_path,
-        )
-    else:
-        execute_results = sync_command._execute_with_progress(configuration, api, setup_params)
+    try:
+        if options.as_jsonl or options.record_path is not None:
+            execute_results = sync_command._execute_observable(
+                setup_params,
+                api=api,
+                emit_jsonl=options.as_jsonl,
+                record_path=options.record_path,
+                plan=plan,
+            )
+        else:
+            execute_results = sync_command._execute_with_progress(configuration, api, setup_params, plan=plan)
+    except PlanStaleError as exc:
+        configuration.output.error(f'{exc.error}. Run the install again to review the changes.')
+        raise typer.Exit(EXIT_FAILURE) from None
 
     if execute_results.total_actions == 0:
         if not options.as_jsonl:
@@ -131,7 +145,7 @@ def _run_profile_install(
                 None,
                 project_directory=options.project_directory,
                 strategy=options.strategy,
-                plugins=options.plugins,
+                plugin_names=options.plugin_names,
                 action_ids=options.action_ids,
                 fail_fast=options.fail_fast,
             ),
@@ -158,7 +172,10 @@ def install_default(  # noqa: PLR0913
     only_action: OnlyActionOption = None,
     jsonl: Annotated[
         bool,
-        typer.Option('--jsonl', help='Stream progress and the final result as newline-delimited JSON'),
+        typer.Option(
+            '--jsonl',
+            help='Stream progress and the final result as newline-delimited JSON',
+        ),
     ] = False,
     record: Annotated[
         Path | None,
@@ -173,29 +190,41 @@ def install_default(  # noqa: PLR0913
             help='Skip confirmation prompt (also honoured via the PORRINGER_ASSUME_YES env var)',
         ),
     ] = False,
+    global_: GlobalOption = False,
 ) -> None:
     """Synchronize an environment from a manifest, profile, or install link.
 
     With no target, Porringer uses the nearest manifest in the current directory
-    tree. You can also pass a local path, an https URL, or a porringer:// link.
+    tree. You can also pass a local path, an https URL, or a porringer:// link,
+    or --global for your global manifest.
     Porringer previews the plan and asks for confirmation before changing
     anything. Pass --yes (or set PORRINGER_ASSUME_YES=1) to run unattended.
     """
     configuration = context.ensure_object(ConsoleConfiguration)
 
     shared = parse_shared_options(
-        configuration, strategy=strategy, project_dir=project_dir, plugin=plugin, only_action=only_action
+        configuration,
+        strategy=strategy,
+        project_dir=project_dir,
+        plugin=plugin,
+        only_action=only_action,
     )
     options = _InstallOptions(
         project_directory=shared.project_directory,
         fail_fast=fail_fast,
         strategy=shared.strategy,
-        plugins=shared.plugins,
+        plugin_names=shared.plugin_names,
         action_ids=shared.action_ids,
         as_jsonl=jsonl,
         record_path=record,
         yes=yes,
     )
+
+    if global_:
+        api = create_api(configuration)
+        path = global_manifest_or_exit(configuration, api, target=target, project_dir=project_dir)
+        _run_manifest_install(configuration, api, path, options)
+        return
 
     resolved_target = resolve_target_or_exit(configuration, target)
     api = create_api(configuration)

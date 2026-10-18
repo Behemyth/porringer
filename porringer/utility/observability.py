@@ -52,7 +52,11 @@ def inspection_diagnostics(report: SyncInspectionReport) -> tuple[Diagnostic, ..
                 code='manifest.load_failed',
                 severity=DiagnosticSeverity.ERROR,
                 message=f'Failed to load manifest: {failed.error}',
-                target=DiagnosticTarget(kind='manifest', path=failed.path, manifest_index=failed.manifest_index),
+                target=DiagnosticTarget(
+                    kind='manifest',
+                    path=failed.path,
+                    manifest_index=failed.manifest_index,
+                ),
                 cause=failed.error,
             )
         )
@@ -79,7 +83,9 @@ def inspection_diagnostics(report: SyncInspectionReport) -> tuple[Diagnostic, ..
     return tuple(diagnostics)
 
 
-def inspection_follow_up_actions(report: SyncInspectionReport) -> tuple[FollowUpAction, ...]:
+def inspection_follow_up_actions(
+    report: SyncInspectionReport,
+) -> tuple[FollowUpAction, ...]:
     """Build follow-up actions for an inspection report."""
     actions: list[FollowUpAction] = []
     for manifest in report.manifests:
@@ -169,7 +175,10 @@ def batch_diagnostics(batch: BatchSetupResults) -> tuple[Diagnostic, ...]:
                     message=result.message or result.action.description,
                     target=_target_for_result(result, ref),
                     cause=result.message,
-                    remediation=Remediation(label='Retry this action', action_id=ref.action_id if ref else None),
+                    remediation=Remediation(
+                        label='Retry this action',
+                        action_id=ref.action_id if ref else None,
+                    ),
                 )
             )
     return tuple(diagnostics)
@@ -394,6 +403,8 @@ def _ref_for_result(
     action_refs: tuple[tuple[SetupAction, ActionRef], ...],
     ref_by_action_id: dict[int, ActionRef],
 ) -> ActionRef | None:
+    if result.ref is not None:
+        return result.ref
     ref = ref_by_action_id.get(id(result.action))
     if ref is not None:
         return ref

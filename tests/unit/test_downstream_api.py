@@ -13,8 +13,9 @@ import pytest
 
 from porringer.api import API
 from porringer.backend.command.tool import ToolCommands
-from porringer.core.schema import PackageRef
+from porringer.core.schema import PackageRef, PluginKind
 from porringer.schema import (
+    ActionRef,
     BatchSetupResults,
     DirectoryState,
     DownloadResult,
@@ -183,12 +184,53 @@ class TestToolCommands:
 
         commands = ToolCommands(cast(Any, _FakeSync()))
 
-        report = await commands.upgrade_project(plugin_names={'pip'}, include_packages={'requests'})
+        report = await commands.upgrade_project(
+            paths=['manifest.toml'],
+            plugin_names={'pip'},
+            include_packages={'requests'},
+            action_ids={'0:1'},
+        )
 
         assert report.operation == 'upgrade_project'
         assert captured[0].strategy == SyncStrategy.LATEST
-        assert captured[0].plugins == {'pip'}
+        assert captured[0].paths == ['manifest.toml']
+        assert captured[0].plugin_names == {'pip'}
+        assert captured[0].action_kinds == {
+            PluginKind.PACKAGE,
+            PluginKind.TOOL,
+            PluginKind.RUNTIME,
+        }
         assert captured[0].include_packages == {'requests'}
+        assert captured[0].action_ids == {'0:1'}
+
+    @staticmethod
+    async def test_upgrade_project_reports_action_ids() -> None:
+        """Upgrade results carry the stable action id from the run."""
+        action = SetupAction(
+            description='Install requests',
+            installer='pip',
+            package=PackageRef.model_validate('requests'),
+        )
+        result = SetupActionResult(action=action, success=True, ref=ActionRef.from_indices(1, 3))
+
+        class _FakeSync:
+            @staticmethod
+            async def run(_params: SetupParameters, **_kwargs: object) -> SyncRunReport:
+                batch = BatchSetupResults(
+                    manifest_results=[
+                        SetupResults(
+                            actions=[action],
+                            action_indices=[3],
+                            results=[result],
+                            manifest_index=1,
+                        )
+                    ]
+                )
+                return SyncRunReport(results=batch)
+
+        report = await ToolCommands(cast(Any, _FakeSync())).upgrade_project()
+
+        assert report.results[0].action_id == '1:3'
 
 
 class TestProfileCommands:
@@ -207,7 +249,10 @@ class TestProfileCommands:
             params.destination.write_text(json.dumps(profile_data), encoding='utf-8')
             return DownloadResult(success=True, path=params.destination)
 
-        with patch('porringer.backend.command.profile.download_file', side_effect=_fake_download):
+        with patch(
+            'porringer.backend.command.profile.download_file',
+            side_effect=_fake_download,
+        ):
             profile = await test_api.profile.resolve('https://example.com/profile.json')
 
         assert profile.name == 'Workstation'
@@ -231,7 +276,10 @@ class TestProfileCommands:
             params.destination.write_text(json.dumps(profile_data), encoding='utf-8')
             return DownloadResult(success=True, path=params.destination)
 
-        with patch('porringer.backend.command.profile.download_file', side_effect=_fake_download):
+        with patch(
+            'porringer.backend.command.profile.download_file',
+            side_effect=_fake_download,
+        ):
             profile = await test_api.profile.resolve('https://example.com/profile.json')
 
         assert profile.manifests[0].url == 'https://example.com/porringer.json'
@@ -252,7 +300,10 @@ class TestProfileCommands:
             params.destination.write_text(json.dumps(profile_data), encoding='utf-8')
             return DownloadResult(success=True, path=params.destination)
 
-        with patch('porringer.backend.command.profile.download_file', side_effect=_fake_download):
+        with patch(
+            'porringer.backend.command.profile.download_file',
+            side_effect=_fake_download,
+        ):
             await test_api.profile.resolve('https://example.com/profile.json', expected_hash='sha256:deadbeef')
 
         assert captured_hashes[0] == 'sha256:deadbeef'

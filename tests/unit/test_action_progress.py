@@ -121,7 +121,11 @@ class TestProgressEvent:
         assert payload['schema_version'] == SCHEMA_VERSION
         assert payload['event_type'] == 'action_started'
         assert payload['action_id'] == '2:4'
-        assert payload['action_ref'] == {'manifest_index': 2, 'action_index': 4, 'action_id': '2:4'}
+        assert payload['action_ref'] == {
+            'manifest_index': 2,
+            'action_index': 4,
+            'action_id': '2:4',
+        }
         assert payload['action']['package_name'] == 'requests'
 
     @staticmethod
@@ -305,7 +309,9 @@ class TestExecutionEvents:
     """Tests for evented sync execution."""
 
     @staticmethod
-    async def test_run_partitions_results_by_action_ref(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test_run_partitions_results_by_action_ref(
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
         """run() groups completed results by stable refs, not result action object identity."""
         commands = SyncCommands()
         first_action = _make_action('first')
@@ -314,8 +320,8 @@ class TestExecutionEvents:
         manifest_one = SetupResults(actions=[second_action], manifest_path=Path('one'))
         synthetic_result_action = _make_action('synthetic')
 
-        async def _fake_execution_events(_parameters: SetupParameters, *, plugins=None):
-            del plugins
+        async def _fake_execution_events(_parameters: SetupParameters, *, plugins=None, executor=None, prepared=None):
+            del plugins, executor, prepared
             yield ManifestLoadedEvent(manifest=manifest_zero, manifest_index=0)
             yield ManifestLoadedEvent(manifest=manifest_one, manifest_index=1)
             yield ActionCompletedEvent(

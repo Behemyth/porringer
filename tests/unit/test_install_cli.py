@@ -13,9 +13,21 @@ from typer.testing import CliRunner
 
 from porringer.api import API
 from porringer.console.entry import app
-from porringer.schema import DownloadResult, InspectionMode, SyncInspectionReport
+from porringer.schema import (
+    DownloadResult,
+    InspectionMode,
+    SetupParameters,
+    SyncInspectionReport,
+    SyncPlan,
+)
+from porringer.utility.exception import PlanStaleError
 
 _EXPECTED_CONFIRMATION_PROMPTS_AFTER_ONE_RETRY = 2
+
+
+def _empty_plan() -> SyncPlan:
+    """A plan with nothing to do."""
+    return SyncPlan(parameters=SetupParameters(), report=SyncInspectionReport())
 
 
 def _write_manifest(path: Path, data: dict) -> Path:
@@ -38,7 +50,11 @@ def _fake_inspection() -> SimpleNamespace:
         unknown=0,
     )
     report = SimpleNamespace(
-        manifests=[], failed_paths=[], summary=summary, success=True, inspection_mode=InspectionMode.COMPLETE
+        manifests=[],
+        failed_paths=[],
+        summary=summary,
+        success=True,
+        inspection_mode=InspectionMode.COMPLETE,
     )
     profile = SimpleNamespace(name='Test Profile')
     return SimpleNamespace(profile=profile, inspection=report)
@@ -60,6 +76,26 @@ class TestInstallCLI:
         assert 'PORRINGER_ASSUME_YES' in result.output
 
     @staticmethod
+    def test_redirected_output_refuses_instead_of_hidden_prompt(tmp_path: Path, test_config) -> None:
+        """An interactive stdin with redirected output fails fast rather than waiting on an invisible prompt."""
+        _write_manifest(tmp_path, {'version': '1', 'packages': {'python': ['requests']}})
+        runner = CliRunner()
+
+        with (
+            patch(
+                'porringer.backend.command.sync.SyncCommands.plan',
+                new_callable=AsyncMock,
+                return_value=_empty_plan(),
+            ),
+            patch('porringer.console.common._stdin_is_interactive', return_value=True),
+        ):
+            result = runner.invoke(app, ['install', str(tmp_path)], obj=test_config, input='y\n')
+
+        assert result.exit_code == 1
+        assert 'output is redirected' in result.output
+        assert 'Apply this setup plan?' not in result.output
+
+    @staticmethod
     def test_preview_inspects_in_complete_mode(tmp_path: Path, test_config) -> None:
         """The confirmation preview always probes real presence (COMPLETE inspection).
 
@@ -73,17 +109,43 @@ class TestInstallCLI:
         runner = CliRunner()
 
         with patch(
-            'porringer.backend.command.sync.SyncCommands.inspect',
+            'porringer.backend.command.sync.SyncCommands.plan',
             new_callable=AsyncMock,
-            return_value=SyncInspectionReport(),
-        ) as inspect_mock:
+            return_value=_empty_plan(),
+        ) as plan_mock:
             result = runner.invoke(app, ['install', str(tmp_path)], obj=test_config, input='n\n')
 
         assert result.exit_code == 0
-        inspect_mock.assert_awaited_once()
-        assert inspect_mock.await_args is not None
-        (params,) = inspect_mock.await_args.args
+        plan_mock.assert_awaited_once()
+        assert plan_mock.await_args is not None
+        (params,) = plan_mock.await_args.args
         assert params.inspection_mode == InspectionMode.COMPLETE
+
+    @staticmethod
+    def test_stale_plan_is_refused(tmp_path: Path, test_config) -> None:
+        """The confirmed plan is what runs; if its files changed, install stops with a hint."""
+        manifest = _write_manifest(tmp_path, {'version': '1', 'packages': {'python': ['requests']}})
+        plan = _empty_plan()
+        runner = CliRunner()
+
+        with (
+            patch(
+                'porringer.backend.command.sync.SyncCommands.plan',
+                new_callable=AsyncMock,
+                return_value=plan,
+            ),
+            patch(
+                'porringer.backend.command.sync.SyncCommands.run',
+                new_callable=AsyncMock,
+                side_effect=PlanStaleError([manifest]),
+            ) as run_mock,
+        ):
+            result = runner.invoke(app, ['install', str(tmp_path), '--yes'], obj=test_config)
+
+        assert result.exit_code == 1
+        assert run_mock.await_args is not None
+        assert run_mock.await_args.kwargs['plan'] is plan
+        assert 'Run the install again' in result.output
 
     @staticmethod
     def test_invalid_confirmation_input_reprompts(tmp_path: Path, test_config) -> None:
@@ -92,9 +154,9 @@ class TestInstallCLI:
         runner = CliRunner()
 
         with patch(
-            'porringer.backend.command.sync.SyncCommands.inspect',
+            'porringer.backend.command.sync.SyncCommands.plan',
             new_callable=AsyncMock,
-            return_value=SyncInspectionReport(),
+            return_value=_empty_plan(),
         ):
             result = runner.invoke(
                 app,
@@ -152,7 +214,10 @@ class TestOpenCLI:
         ):
             result = runner.invoke(
                 app,
-                ['open', 'porringer://profile?url=https://example.com/profile.json&sha256=abc123'],
+                [
+                    'open',
+                    'porringer://profile?url=https://example.com/profile.json&sha256=abc123',
+                ],
                 obj=test_config,
             )
 
@@ -185,7 +250,10 @@ class TestProfileHashEnforcement:
             return DownloadResult(success=False, message='Hash mismatch: expected deadbeef, got abc123')
 
         with (
-            patch('porringer.backend.command.profile.download_file', side_effect=_fake_download),
+            patch(
+                'porringer.backend.command.profile.download_file',
+                side_effect=_fake_download,
+            ),
             pytest.raises(ValueError, match='Hash mismatch'),
         ):
             await test_api.profile.resolve('https://example.com/profile.json', expected_hash='sha256:deadbeef')

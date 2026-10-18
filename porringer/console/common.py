@@ -4,6 +4,7 @@ Shared helpers and constants for Porringer CLI commands.
 """
 
 import asyncio
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated
@@ -22,7 +23,12 @@ EXIT_FAILURE = 1
 
 def create_api(configuration: ConsoleConfiguration) -> API:
     """Create an :class:`API` instance from the CLI configuration."""
-    return API(configuration.local_configuration)
+    return API(configuration.local_configuration, configuration.global_configuration)
+
+
+def _stdin_is_interactive() -> bool:
+    """Whether a person can type an answer on stdin."""
+    return sys.stdin.isatty()
 
 
 def confirm_or_abort(configuration: ConsoleConfiguration, *, yes: bool, prompt: str) -> None:
@@ -33,12 +39,21 @@ def confirm_or_abort(configuration: ConsoleConfiguration, *, yes: bool, prompt: 
     cancellation and gets the same plain treatment. Only when there is no
     interactive terminal to prompt on at all (confirmation genuinely can't
     be obtained) does this exit with a failure and an actionable hint
-    naming the non-interactive options.
+    naming the non-interactive options.  The same applies when a person is
+    at the keyboard but output is redirected, so the question would be
+    invisible and the run would appear to hang.
     """
     if yes:
         return
 
     console = configuration.output.console
+    if _stdin_is_interactive() and not console.is_terminal:
+        configuration.output.warning(
+            'Cannot ask for confirmation while output is redirected. '
+            'Pass --yes or set PORRINGER_ASSUME_YES=1 to run non-interactively.'
+        )
+        raise typer.Exit(EXIT_FAILURE)
+
     while True:
         try:
             # markup=False: the "[y/N]" default hint would otherwise be
@@ -158,7 +173,7 @@ def build_setup_parameters(
     *,
     project_directory: Path | None = None,
     strategy: SyncStrategy = SyncStrategy.MINIMAL,
-    plugins: set[str] | None = None,
+    plugin_names: set[str] | None = None,
     action_ids: set[str] | None = None,
     inspection_mode: InspectionMode = InspectionMode.COMPLETE,
     fail_fast: bool = True,
@@ -175,7 +190,7 @@ def build_setup_parameters(
         project_directory=project_directory,
         fail_fast=fail_fast,
         strategy=strategy,
-        plugins=plugins,
+        plugin_names=plugin_names,
         action_ids=action_ids,
         inspection_mode=inspection_mode,
     )
@@ -202,8 +217,33 @@ PluginOption = Annotated[
 ]
 OnlyActionOption = Annotated[
     list[str] | None,
-    typer.Option('--only-action', help='Run only these stable action ids, such as 0:2 (repeatable)'),
+    typer.Option(
+        '--only-action',
+        help='Run only these stable action ids, such as 0:2 (repeatable)',
+    ),
 ]
+GlobalOption = Annotated[
+    bool,
+    typer.Option('--global', help="Use your global manifest instead of a project's"),
+]
+
+
+def global_manifest_or_exit(
+    configuration: ConsoleConfiguration,
+    api: API,
+    *,
+    target: str | None = None,
+    project_dir: Path | None = None,
+) -> Path:
+    """Return the global manifest path, exiting when it can't be used."""
+    if target is not None or project_dir is not None:
+        configuration.output.error('--global cannot be combined with a target or --project-dir')
+        raise typer.Exit(EXIT_FAILURE)
+    path = api.global_manifest_path
+    if not path.is_file():
+        configuration.output.print(f'[muted]No global manifest yet: {path}[/muted]')
+        raise typer.Exit(EXIT_SUCCESS)
+    return path
 
 
 @dataclass(slots=True)
@@ -212,7 +252,7 @@ class SharedOptions:
 
     strategy: SyncStrategy
     project_directory: Path | None
-    plugins: set[str] | None
+    plugin_names: set[str] | None
     action_ids: set[str] | None
 
 
@@ -228,6 +268,6 @@ def parse_shared_options(
     return SharedOptions(
         strategy=parse_strategy(configuration, strategy),
         project_directory=project_dir.resolve() if project_dir else None,
-        plugins=set(plugin) if plugin else None,
+        plugin_names=set(plugin) if plugin else None,
         action_ids=set(only_action) if only_action else None,
     )

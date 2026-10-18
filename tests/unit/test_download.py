@@ -47,7 +47,7 @@ async def test_retry_recovers_from_transient_failure(tmp_path: Path, monkeypatch
     monkeypatch.setattr(download_utility, '_download_attempt', attempt)
     session = cast(aiohttp.ClientSession, _Session(_Response()))
 
-    actual = await download_utility._download_with_retries(session, _state(tmp_path), None)
+    actual = await download_utility._download_with_retries(session, _state(tmp_path))
 
     assert actual is result
     assert attempt.await_count == len(outcomes)
@@ -61,7 +61,7 @@ async def test_retry_exhaustion_propagates_last_error(tmp_path: Path, monkeypatc
     session = cast(aiohttp.ClientSession, _Session(_Response()))
 
     with pytest.raises(aiohttp.ClientConnectionError) as caught:
-        await download_utility._download_with_retries(session, _state(tmp_path), None)
+        await download_utility._download_with_retries(session, _state(tmp_path))
 
     assert caught.value is error
     assert attempt.await_count == download_utility._DOWNLOAD_ATTEMPTS
@@ -75,7 +75,7 @@ async def test_retry_does_not_repeat_http_client_error(tmp_path: Path, monkeypat
     session = cast(aiohttp.ClientSession, _Session(_Response()))
 
     with pytest.raises(aiohttp.ClientResponseError) as caught:
-        await download_utility._download_with_retries(session, _state(tmp_path), None)
+        await download_utility._download_with_retries(session, _state(tmp_path))
 
     assert caught.value is error
     assert attempt.await_count == 1
@@ -88,7 +88,7 @@ async def test_retry_does_not_repeat_cancellation(tmp_path: Path, monkeypatch: p
     session = cast(aiohttp.ClientSession, _Session(_Response()))
 
     with pytest.raises(asyncio.CancelledError):
-        await download_utility._download_with_retries(session, _state(tmp_path), None)
+        await download_utility._download_with_retries(session, _state(tmp_path))
 
     assert attempt.await_count == 1
 
@@ -181,7 +181,6 @@ async def test_http_failure_closes_and_removes_temporary_file(tmp_path: Path, op
         await download_utility._download_attempt(
             cast(aiohttp.ClientSession, _Session(_Response(error=error))),
             _state(tmp_path),
-            None,
         )
 
     _assert_failed_attempt_cleaned_up(tmp_path, opened_files)
@@ -194,7 +193,6 @@ async def test_header_size_mismatch_closes_and_removes_temporary_file(
     result = await download_utility._download_attempt(
         cast(aiohttp.ClientSession, _Session(_Response(content_length=2))),
         _state(tmp_path, expected_size=1),
-        None,
     )
 
     assert result.success is False
@@ -211,7 +209,7 @@ async def test_verified_download_replaces_destination(tmp_path: Path, opened_fil
     response = _Response(content_length=len(payload))
     response.content = _Content((b'new ', b'archive'))
 
-    result = await download_utility._download_attempt(cast(aiohttp.ClientSession, _Session(response)), state, None)
+    result = await download_utility._download_attempt(cast(aiohttp.ClientSession, _Session(response)), state)
 
     assert result.success
     assert result.verified

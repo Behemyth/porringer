@@ -15,11 +15,13 @@ in the sibling modules:
 
 import asyncio
 import contextlib
+import functools
 import inspect as inspectlib
 import logging
 import shutil
 import tempfile
-from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Generator, Sequence
+from contextvars import ContextVar
 from dataclasses import replace
 from pathlib import Path
 from urllib.parse import urlparse
@@ -48,24 +50,51 @@ from porringer.schema import (
     SetupParameters,
     SetupResults,
     SyncInspectionReport,
+    SyncPlan,
     SyncRunReport,
     action_id_for,
 )
 from porringer.utility import HTTP_TIMEOUT
 from porringer.utility.concurrency import gather_bounded
 from porringer.utility.download import download_file
-from porringer.utility.exception import ManifestError
-from porringer.utility.observability import batch_diagnostics, batch_follow_up_actions, result_status
+from porringer.utility.exception import (
+    ManifestError,
+    PlanStaleError,
+    PorringerBusyError,
+)
+from porringer.utility.observability import (
+    batch_diagnostics,
+    batch_follow_up_actions,
+    result_status,
+)
 
 from .core.action_builder import load_manifest
 from .core.discovery import discover_all_plugins, invalidate_plugin_cache
-from .core.execution import _plugins_discovered_event, execute_single
+from .core.execution import _plugins_discovered_event, execute_manifest
+from .core.fingerprint import changed_paths, plan_fingerprints
 from .core.inspection import build_manifest_inspection, build_sync_inspection_report
 from .manifest import has_manifest as _has_manifest
 from .manifest import manifest_filenames as _manifest_filenames
 from .manifest import manifest_schema, validate_manifest
 
 logger = logging.getLogger(__name__)
+
+# Ids of SyncCommands instances whose ``run`` is active in the current context.
+# Callbacks run in the caller's context, so this detects reentrant runs.
+_ACTIVE_RUNS: ContextVar[frozenset[int]] = ContextVar('porringer_active_runs', default=frozenset())
+
+type ManifestExecutor = Callable[..., Awaitable[SetupResults]]
+
+type _Prepared = tuple[list[SetupResults], list[tuple[int, Path, str]]]
+"""Manifests already loaded by a plan, and the inputs that failed to load."""
+
+
+async def _notify(on_event: Callable[[ProgressEvent], object] | None, event: ProgressEvent) -> None:
+    """Pass *event* to *on_event*, awaiting it if it returns an awaitable."""
+    if on_event is not None:
+        maybe_awaitable = on_event(event)
+        if inspectlib.isawaitable(maybe_awaitable):
+            await maybe_awaitable
 
 
 def _action_indices(preview: SetupResults) -> list[int]:
@@ -102,8 +131,50 @@ class SyncCommands:
     has moved to :class:`~porringer.backend.command.package.PackageCommands`.
     """
 
-    def __init__(self) -> None:
-        """Initialize the SyncCommands class."""
+    def __init__(self, global_manifest_path: Path | None = None) -> None:
+        """Initialize the SyncCommands class.
+
+        Args:
+            global_manifest_path: The user's global manifest. It declares
+                entries only, so nothing is inferred from where it lives.
+        """
+        self._global_manifest_path = global_manifest_path.resolve() if global_manifest_path else None
+        # Manifests that declare entries only; nothing is inferred from where they live.
+        self._standalone_paths: set[Path] = set()
+        if self._global_manifest_path is not None:
+            self._standalone_paths |= {
+                self._global_manifest_path,
+                self._global_manifest_path.parent,
+            }
+        # Created per event loop so sequential ``asyncio.run`` calls can
+        # share one API instance.
+        self._lock: asyncio.Lock | None = None
+        self._lock_loop: asyncio.AbstractEventLoop | None = None
+
+    def _execution_lock(self) -> asyncio.Lock:
+        """Return this instance's execution lock for the running loop."""
+        loop = asyncio.get_running_loop()
+        if self._lock is None or self._lock_loop is not loop:
+            self._lock = asyncio.Lock()
+            self._lock_loop = loop
+        return self._lock
+
+    @property
+    def global_manifest_path(self) -> Path | None:
+        """The global manifest used by this instance, when configured."""
+        return self._global_manifest_path
+
+    @contextlib.contextmanager
+    def standalone_manifest(self, path: Path) -> Generator[None]:
+        """Disable project inference for *path* for the duration of the context."""
+        resolved = path.resolve()
+        registered = resolved in self._standalone_paths
+        self._standalone_paths.add(resolved)
+        try:
+            yield
+        finally:
+            if not registered:
+                self._standalone_paths.discard(resolved)
 
     # --- Static helpers delegated to sub-modules ---
 
@@ -239,6 +310,10 @@ class SyncCommands:
 
     # --- Manifest loading ---
 
+    def _is_standalone(self, path: Path) -> bool:
+        """Whether *path* names a standalone manifest such as the global one, or its directory."""
+        return path.resolve() in self._standalone_paths
+
     def _load_manifests(
         self,
         parameters: SetupParameters,
@@ -265,7 +340,12 @@ class SyncCommands:
 
         for manifest_index, path in enumerate(paths):
             try:
-                preview = load_manifest(path, strategy=parameters.strategy, plugins=plugins)
+                preview = load_manifest(
+                    path,
+                    strategy=parameters.strategy,
+                    plugins=plugins,
+                    infer=not self._is_standalone(path),
+                )
             except ManifestError as e:
                 logger.warning(f'Failed to load manifest at {path}: {e.error}')
                 failed_paths.append((manifest_index, path, e.error))
@@ -286,15 +366,20 @@ class SyncCommands:
         indexed_actions = list(zip(_action_indices(preview), preview.actions, strict=True))
 
         # Filter actions to only included plugins.
-        if parameters.plugins:
+        if parameters.plugin_names is not None:
             indexed_actions = [
                 (index, action)
                 for index, action in indexed_actions
-                if action.installer is None or action.installer in parameters.plugins
+                if action.installer is None or action.installer in parameters.plugin_names
+            ]
+
+        if parameters.action_kinds is not None:
+            indexed_actions = [
+                (index, action) for index, action in indexed_actions if action.kind in parameters.action_kinds
             ]
 
         # Filter actions to only included packages.
-        if parameters.include_packages:
+        if parameters.include_packages is not None:
             names = {name.lower() for name in parameters.include_packages}
             indexed_actions = [
                 (index, action)
@@ -312,11 +397,16 @@ class SyncCommands:
                 for index, action in indexed_actions
             ]
 
-        if parameters.action_ids:
+        if parameters.action_ids is not None:
             indexed_actions = [
                 (index, action)
                 for index, action in indexed_actions
                 if action_id_for(manifest_index, index) in parameters.action_ids
+            ]
+
+        if parameters.entry_ids is not None:
+            indexed_actions = [
+                (index, action) for index, action in indexed_actions if action.entry_id in parameters.entry_ids
             ]
 
         preview.action_indices = [index for index, _action in indexed_actions]
@@ -327,13 +417,15 @@ class SyncCommands:
         parameters: SetupParameters,
         *,
         plugins: DiscoveredPlugins | None = None,
+        on_event: Callable[[ProgressEvent], object] | None = None,
     ) -> SyncInspectionReport:
         """Inspect manifests without executing setup actions.
 
         This is the structured preview/diagnostics path for frontends
         and CLI JSON output.  It loads manifests, discovers plugins,
         validates each manifest, resolves native commands, performs
-        presence/update checks, and returns a stable report.
+        presence/update checks, and returns a stable report.  To run
+        exactly what was inspected, use :meth:`plan` instead.
 
         Args:
             parameters: Setup parameters controlling paths, strategy,
@@ -342,62 +434,131 @@ class SyncCommands:
             plugins: Pre-discovered plugins.  When provided, plugin
                 discovery is skipped and the supplied runtime context is
                 reused.
+            on_event: Optional callback for inspection events, as for :meth:`plan`.
 
         Returns:
             A structured inspection report.
         """
-        tmp_dir: Path | None = None
+        plan = await self.plan(parameters, plugins=plugins, on_event=on_event)
+        plan.discard()
+        return plan.report
+
+    async def plan(
+        self,
+        parameters: SetupParameters,
+        *,
+        plugins: DiscoveredPlugins | None = None,
+        on_event: Callable[[ProgressEvent], object] | None = None,
+    ) -> SyncPlan:
+        """Inspect manifests and freeze the result into a plan for :meth:`run`.
+
+        Events reach ``on_event`` in this order: one ``PluginsDiscoveredEvent``,
+        a ``ManifestFailedEvent``
+        for each input that could not be loaded, a ``ManifestLoadedEvent``
+        for each manifest, then one ``ActionInspectedEvent`` per action,
+        manifest by manifest.  Actions are reported as their checks
+        finish, so with complete inspection they can arrive out of source
+        order within a manifest; ``plan.report`` is always in source order.
+
+        Args:
+            parameters: Setup parameters, as for :meth:`inspect`.
+            plugins: Pre-discovered plugins, as for :meth:`inspect`.
+            on_event: Optional callback for inspection events. If it
+                returns an awaitable, it is awaited.
+
+        Returns:
+            The plan. Run it with ``run(plan=...)`` or release it with ``plan.discard()``.
+        """
+        local_paths, urls = self._resolve_paths(parameters)
+        tmp_dir = Path(tempfile.mkdtemp(prefix='porringer_')) if urls else None
         try:
-            local_paths, urls = self._resolve_paths(parameters)
             effective_params = parameters
-            if urls:
-                tmp = tempfile.mkdtemp(prefix='porringer_')
-                tmp_dir = Path(tmp)
+            if tmp_dir is not None:
                 url_paths = await self._download_urls(urls, tmp_dir, max_concurrency=parameters.max_concurrency)
                 effective_params = parameters.model_copy(update={'paths': [*local_paths, *url_paths]})
-
-            shared_plugins = plugins
-            if shared_plugins is None:
-                shared_plugins = await asyncio.to_thread(discover_all_plugins, use_cache=True)
-
-            previews, failed = await asyncio.to_thread(self._load_manifests, effective_params, shared_plugins)
-            if (
-                effective_params.inspection_mode != InspectionMode.FAST
-                and shared_plugins.runtime_context is None
-                and _inspection_needs_runtime(previews, shared_plugins)
-            ):
-                shared_plugins.runtime_context = await Builder.resolve_runtime_context(shared_plugins.environments)
-
-            failed_paths = tuple(
-                FailedPathInspection(path=path, error=error, manifest_index=manifest_index)
-                for manifest_index, path, error in failed
+            return await self._build_plan(
+                effective_params,
+                local_paths,
+                tmp_dir,
+                plugins=plugins,
+                on_event=on_event,
             )
-            manifests = []
-            for index, preview in enumerate(previews):
-                manifest_index = preview.manifest_index if preview.manifest_index is not None else index
-                diagnostics = ()
-                if preview.manifest_path is not None:
-                    validation = await asyncio.to_thread(validate_manifest, preview.manifest_path)
-                    diagnostics = tuple(validation.diagnostics)
-                manifests.append(
-                    await build_manifest_inspection(
-                        index=manifest_index,
-                        preview=preview,
-                        plugins=shared_plugins,
-                        parameters=effective_params,
-                        diagnostics=diagnostics,
-                    )
-                )
-
-            return build_sync_inspection_report(
-                manifests=tuple(manifests),
-                failed_paths=failed_paths,
-                plugins=shared_plugins,
-                inspection_mode=effective_params.inspection_mode,
-            )
-        finally:
+        except BaseException:
             if tmp_dir is not None:
                 shutil.rmtree(tmp_dir, ignore_errors=True)
+            raise
+
+    async def _build_plan(
+        self,
+        parameters: SetupParameters,
+        local_paths: Sequence[Path],
+        download_directory: Path | None,
+        *,
+        plugins: DiscoveredPlugins | None,
+        on_event: Callable[[ProgressEvent], object] | None,
+    ) -> SyncPlan:
+        """Load, fingerprint and inspect the manifests named by *parameters*."""
+        shared_plugins = plugins
+        if shared_plugins is None:
+            shared_plugins = await asyncio.to_thread(discover_all_plugins, use_cache=True)
+
+        previews, failed = await asyncio.to_thread(self._load_manifests, parameters, shared_plugins)
+        indices = [
+            preview.manifest_index if preview.manifest_index is not None else index
+            for index, preview in enumerate(previews)
+        ]
+
+        # Announce everything that loaded before the slow part, so a client can lay out its rows.
+        notify = functools.partial(_notify, on_event)
+        if on_event is not None:
+            await notify(await asyncio.to_thread(_plugins_discovered_event, shared_plugins))
+        for manifest_index, path, error in failed:
+            await notify(ManifestFailedEvent(failed_path=(path, error), manifest_index=manifest_index))
+        for manifest_index, preview in zip(indices, previews, strict=True):
+            await notify(ManifestLoadedEvent(manifest=preview, manifest_index=manifest_index))
+
+        if (
+            parameters.inspection_mode != InspectionMode.FAST
+            and shared_plugins.runtime_context is None
+            and _inspection_needs_runtime(previews, shared_plugins)
+        ):
+            shared_plugins.runtime_context = await Builder.resolve_runtime_context(shared_plugins.environments)
+        fingerprints = await asyncio.to_thread(plan_fingerprints, local_paths, previews)
+
+        manifests = []
+        for manifest_index, preview in zip(indices, previews, strict=True):
+            diagnostics = ()
+            if preview.manifest_path is not None:
+                validation = await asyncio.to_thread(validate_manifest, preview.manifest_path)
+                diagnostics = tuple(validation.diagnostics)
+            manifests.append(
+                await build_manifest_inspection(
+                    index=manifest_index,
+                    preview=preview,
+                    plugins=shared_plugins,
+                    parameters=parameters,
+                    diagnostics=diagnostics,
+                    on_inspected=notify,
+                )
+            )
+
+        report = build_sync_inspection_report(
+            manifests=tuple(manifests),
+            failed_paths=tuple(
+                FailedPathInspection(path=path, error=error, manifest_index=manifest_index)
+                for manifest_index, path, error in failed
+            ),
+            plugins=shared_plugins,
+            inspection_mode=parameters.inspection_mode,
+        )
+        return SyncPlan(
+            parameters=parameters,
+            report=report,
+            manifests=tuple(previews),
+            failed_paths=tuple(failed),
+            fingerprints=fingerprints,
+            download_directory=download_directory,
+        )
 
     async def inspect_paths(
         self,
@@ -431,12 +592,24 @@ class SyncCommands:
             path = await asyncio.to_thread(Path(raw).resolve)
             exists = await asyncio.to_thread(path.exists)
             if not exists:
-                statuses.append(DirectoryStatus(path=path, name=path.name, exists=False, state=DirectoryState.MISSING))
+                statuses.append(
+                    DirectoryStatus(
+                        path=path,
+                        name=path.name,
+                        exists=False,
+                        state=DirectoryState.MISSING,
+                    )
+                )
                 continue
 
             if not await asyncio.to_thread(self.has_manifest, path):
                 statuses.append(
-                    DirectoryStatus(path=path, name=path.name, exists=True, state=DirectoryState.NO_MANIFEST)
+                    DirectoryStatus(
+                        path=path,
+                        name=path.name,
+                        exists=True,
+                        state=DirectoryState.NO_MANIFEST,
+                    )
                 )
                 continue
 
@@ -466,11 +639,15 @@ class SyncCommands:
         parameters: SetupParameters,
         *,
         plugins: DiscoveredPlugins | None = None,
+        executor: ManifestExecutor = execute_manifest,
+        prepared: _Prepared | None = None,
     ) -> AsyncIterator[ProgressEvent]:
         """Yield progress events while executing setup actions.
 
         Public callers should use :meth:`run` with ``on_event`` instead
-        of depending on the generator implementation directly.
+        of depending on the generator implementation directly.  When
+        *prepared* is given, its manifests run as-is instead of being
+        downloaded and loaded from *parameters*.
         """
         queue: asyncio.Queue[ProgressEvent | None] = asyncio.Queue()
         tmp_dir: Path | None = None
@@ -484,7 +661,7 @@ class SyncCommands:
                 # loading.
                 local_paths, urls = self._resolve_paths(parameters)
                 effective_params = parameters
-                if urls:
+                if urls and prepared is None:
                     tmp = tempfile.mkdtemp(prefix='porringer_')
                     tmp_dir = Path(tmp)
                     url_paths = await self._download_urls(urls, tmp_dir, max_concurrency=parameters.max_concurrency)
@@ -502,16 +679,20 @@ class SyncCommands:
                     # pre-passed plugins (they already have the map).
                     queue.put_nowait(await asyncio.to_thread(_plugins_discovered_event, shared_plugins))
 
-                previews, failed = await asyncio.to_thread(self._load_manifests, effective_params, shared_plugins)
+                previews, failed = (
+                    prepared
+                    if prepared is not None
+                    else await asyncio.to_thread(self._load_manifests, effective_params, shared_plugins)
+                )
 
                 for manifest_index, path, error in failed:
                     queue.put_nowait(ManifestFailedEvent(failed_path=(path, error), manifest_index=manifest_index))
 
                 for index, preview in enumerate(previews):
                     manifest_index = preview.manifest_index if preview.manifest_index is not None else index
-                    # execute_single populates CLI commands, emits
+                    # execute_manifest populates CLI commands, emits
                     # MANIFEST_LOADED, then reports ACTION_* events.
-                    await execute_single(
+                    await executor(
                         preview,
                         parameters,
                         event_queue=queue,
@@ -552,8 +733,9 @@ class SyncCommands:
 
     async def run(
         self,
-        parameters: SetupParameters,
+        parameters: SetupParameters | None = None,
         *,
+        plan: SyncPlan | None = None,
         plugins: DiscoveredPlugins | None = None,
         on_event: Callable[[ProgressEvent], object] | None = None,
     ) -> SyncRunReport:
@@ -563,43 +745,141 @@ class SyncCommands:
         events flow through ``on_event`` when provided, then the same
         events are collected into ``BatchSetupResults``.
 
+        Pass either *parameters*, to load and run the manifests now, or
+        a *plan* from :meth:`plan`, to run exactly what was previewed.
+        A plan is checked against its files first and is consumed by the
+        run, whether it succeeds or not.
+
         .. warning::
             Execution mutates process-global ``PATH`` so that runtimes
-            installed mid-sync become discoverable.  Do **not** run two
-            syncs concurrently in the same process; their ``PATH``
-            changes are not isolated from one another.  Embedders that
-            need parallel syncs should use separate processes.
+            installed mid-sync become discoverable.  Runs on one ``API``
+            instance are serialized; separate instances or processes are
+            not coordinated.
 
         Args:
             parameters: The setup parameters (paths, strategy, filters, etc.).
+            plan: A plan to run instead of *parameters*.
             plugins: Pre-discovered plugins from :meth:`API.discover_plugins`.
             on_event: Optional callback invoked for every progress event
                 before collection. If it returns an awaitable, it is awaited.
 
         Returns:
             Structured sync run report with batch results, diagnostics, and follow-up actions.
+
+        Raises:
+            ValueError: If both or neither of *parameters* and *plan* are given,
+                or the plan was already run or discarded.
+            PlanStaleError: If a file the plan was built from changed since.
+            PorringerBusyError: If called from inside a run on the same instance,
+                for example from ``on_event``.
         """
+        if plan is not None:
+            if parameters is not None:
+                raise ValueError('Pass either parameters or a plan, not both')
+            return await self._run_plan(plan, plugins=plugins, on_event=on_event)
+        if parameters is None:
+            raise ValueError('Pass either parameters or a plan')
+        return await self._run_exclusive(parameters, plugins=plugins, on_event=on_event, executor=execute_manifest)
+
+    async def _run_plan(
+        self,
+        plan: SyncPlan,
+        *,
+        plugins: DiscoveredPlugins | None,
+        on_event: Callable[[ProgressEvent], object] | None,
+    ) -> SyncRunReport:
+        """Run a frozen plan under the execution lock, refusing it if stale."""
+        async with self._exclusive():
+            if plan.consumed:
+                raise ValueError('This plan was already run or discarded; make a new one')
+            try:
+                changed = await asyncio.to_thread(changed_paths, plan.fingerprints)
+                if changed:
+                    raise PlanStaleError(changed)
+                # Fresh containers so execution never writes into the plan.
+                previews = [
+                    replace(
+                        preview,
+                        actions=list(preview.actions),
+                        action_indices=list(preview.action_indices),
+                        results=[],
+                    )
+                    for preview in plan.manifests
+                ]
+                return await self._run_unlocked(
+                    plan.parameters,
+                    plugins=plugins,
+                    on_event=on_event,
+                    executor=execute_manifest,
+                    prepared=(previews, list(plan.failed_paths)),
+                )
+            finally:
+                plan.discard()
+
+    async def _run_exclusive(
+        self,
+        parameters: SetupParameters,
+        *,
+        plugins: DiscoveredPlugins | None,
+        on_event: Callable[[ProgressEvent], object] | None,
+        executor: ManifestExecutor,
+    ) -> SyncRunReport:
+        """Run *executor* over each manifest under this instance's execution lock."""
+        async with self._exclusive():
+            return await self._run_unlocked(parameters, plugins=plugins, on_event=on_event, executor=executor)
+
+    @contextlib.asynccontextmanager
+    async def _exclusive(self) -> AsyncGenerator[None]:
+        """Hold this instance's execution lock, refusing re-entrant use.
+
+        Raises:
+            PorringerBusyError: If a run on this instance is already active in this task.
+        """
+        active = _ACTIVE_RUNS.get()
+        if id(self) in active:
+            raise PorringerBusyError('A sync run is already active on this API; reentrant runs are not supported')
+
+        async with self._execution_lock():
+            token = _ACTIVE_RUNS.set(active | {id(self)})
+            try:
+                yield
+            finally:
+                _ACTIVE_RUNS.reset(token)
+
+    async def _run_unlocked(
+        self,
+        parameters: SetupParameters,
+        *,
+        plugins: DiscoveredPlugins | None,
+        on_event: Callable[[ProgressEvent], object] | None,
+        executor: ManifestExecutor,
+        prepared: _Prepared | None = None,
+    ) -> SyncRunReport:
+        """Execute setup without taking the execution lock."""
         manifests: list[SetupResults] = []
         collected: list[tuple[ActionRef | None, SetupActionResult]] = []
         failed_paths: list[tuple[Path, str]] = []
 
-        async for event in self._execution_events(parameters, plugins=plugins):
-            if on_event is not None:
-                maybe_awaitable = on_event(event)
-                if inspectlib.isawaitable(maybe_awaitable):
-                    await maybe_awaitable
+        async for event in self._execution_events(parameters, plugins=plugins, executor=executor, prepared=prepared):
+            await _notify(on_event, event)
             if isinstance(event, ManifestLoadedEvent):
                 manifests.append(event.manifest)
             elif isinstance(event, ManifestFailedEvent):
                 failed_paths.append(event.failed_path)
             elif isinstance(event, ActionCompletedEvent):
-                collected.append((event.action_ref, event.result))
+                result = event.result
+                if result.ref is None and event.action_ref is not None:
+                    result.ref = event.action_ref
+                collected.append((event.action_ref, result))
 
         # Partition by stable action refs, keeping object-identity only as
         # a compatibility fallback for legacy events without refs. Results are
         # grouped in a single pass to avoid an O(manifests * results) scan.
         indexed_previews = [
-            (preview, preview.manifest_index if preview.manifest_index is not None else index)
+            (
+                preview,
+                preview.manifest_index if preview.manifest_index is not None else index,
+            )
             for index, preview in enumerate(manifests)
         ]
 

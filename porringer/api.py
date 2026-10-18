@@ -7,7 +7,10 @@ import asyncio
 import logging
 
 from porringer.backend.builder import Builder
-from porringer.backend.command.core.discovery import DiscoveredPlugins, discover_all_plugins
+from porringer.backend.command.core.discovery import (
+    DiscoveredPlugins,
+    discover_all_plugins,
+)
 from porringer.backend.command.package import PackageCommands
 from porringer.backend.command.plugin import PluginCommands
 from porringer.backend.command.profile import ProfileCommands
@@ -43,23 +46,28 @@ class API:
 
     def __init__(
         self,
-        local_configuration: LocalConfiguration,
+        local_configuration: LocalConfiguration | None = None,
         global_configuration: GlobalConfiguration | None = None,
     ) -> None:
         """Initializes the API.
 
         Args:
-            local_configuration: The local configuration.
+            local_configuration: Optional local configuration (uses defaults if not provided).
             global_configuration: Optional global configuration (uses defaults if not provided).
         """
+        if local_configuration is None:
+            local_configuration = LocalConfiguration()
         if global_configuration is None:
             global_configuration = GlobalConfiguration()
 
-        resolve_configuration(local_configuration, global_configuration)
+        directories = resolve_configuration(local_configuration, global_configuration)
+
+        self.global_manifest_path = directories.config_directory / 'porringer.json'
+        """The user's global manifest. It may not exist yet."""
 
         self.extension = PluginCommands()
         self.package = PackageCommands()
-        self.sync = SyncCommands()
+        self.sync = SyncCommands(self.global_manifest_path)
         self.tool = ToolCommands(self.sync)
         self.profile = ProfileCommands(self.sync)
 
