@@ -58,7 +58,7 @@ For contribution guidelines, see [CONTRIBUTING.md](https://github.com/synodic/.g
 - [Install command](https://synodic.github.io/porringer/install/)
 - [Preview command](https://synodic.github.io/porringer/preview/)
 - [Check command](https://synodic.github.io/porringer/check/)
-- [Download command](https://synodic.github.io/porringer/download/)
+- [Download API](https://synodic.github.io/porringer/download/)
 - [API surface](https://synodic.github.io/porringer/api/)
 - [Development](https://synodic.github.io/porringer/development/)
 

@@ -110,7 +110,8 @@ source = "scm"
 [tool.pdm.scripts]
 analyze = "ruff check"
 format = "ruff format"
-lint = { composite = ["analyze", "format", "type-check"] }
+format-check = "ruff format --check"
+lint = { composite = ["analyze", "format-check", "type-check"] }
 test = "pytest --disable-socket --allow-hosts=127.0.0.1,::1 tests"
 type-check = "pyrefly check"
 docs-schema = "porringer schema --output docs/schema.json"
