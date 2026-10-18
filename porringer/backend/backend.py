@@ -139,6 +139,10 @@ class BackendResolver:
         """
         return list(self._backend_plugins.get((kind, ecosystem), []))
 
+    def is_available(self, plugin_name: str) -> bool:
+        """Return ``True`` if *plugin_name* is supported here and its tool is available now."""
+        return self._is_suitable(plugin_name)
+
     def validator_for(self, kind: PluginKind, ecosystem: Ecosystem) -> str | None:
         """Return the `package_name_validator()` tag for the resolved plugin.
 

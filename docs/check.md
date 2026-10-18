@@ -31,12 +31,36 @@ Include pre-release versions in update results:
 porringer check --prereleases
 ```
 
+## Per Runtime
+
+Check the packages installed in one interpreter, or in every interpreter plus global stores such as pipx:
+
+```shell
+porringer check --runtime 3.14
+porringer check --all-runtimes
+```
+
+Each interpreter is labelled with its provider and whether it is the default and was installed by that provider. Global stores appear once, not once per interpreter. A location that can't be listed is reported as an error, never as "no packages".
+
+## Global Manifest
+
+Check only the entries of your global manifest:
+
+```shell
+porringer check --global
+```
+
+Pre-release handling then comes from each entry's `include_prereleases`, so `--prereleases` can't be combined with `--global`.
+
 ## Options
 
 | Option | Short | Description |
 | --- | --- | --- |
 | `--plugin` | `-p` | Plugin names to check. Omit to check every available environment plugin. |
 | `--prereleases` | | Include pre-release versions. |
+| `--global` | | Check the entries of your global manifest. |
+| `--runtime` | `-r` | Check packages installed in this runtime tag. Repeatable. |
+| `--all-runtimes` | | Check packages in every runtime and every global store. |
 
 ## API Usage
 
@@ -49,7 +73,7 @@ from porringer.schema import CheckParameters, LocalConfiguration
 
 async def main() -> None:
     api = API(LocalConfiguration())
-    params = CheckParameters(plugins=['pip'], include_prereleases=False)
+    params = CheckParameters(plugin_names={'pip'}, include_prereleases=False)
     results = await api.package.check_updates(params)
 
     for result in results:

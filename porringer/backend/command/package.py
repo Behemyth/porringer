@@ -18,12 +18,17 @@ from typing import Any
 from packaging.version import Version
 
 from porringer.backend.builder import Builder
-from porringer.backend.command.core.discovery import DiscoveredPlugins, discover_all_plugins
+from porringer.backend.command.core.discovery import (
+    DiscoveredPlugins,
+    discover_all_plugins,
+)
+from porringer.backend.command.inventory import build_inventory
 from porringer.core.plugin_schema.environment import CheckUpdatesParameters, Environment
 from porringer.core.plugin_schema.runtime import RuntimeContext
 from porringer.schema import (
     CheckParameters,
     CheckResult,
+    InventoryReport,
     PackageUpdateInfo,
 )
 from porringer.utility.concurrency import gather_bounded
@@ -153,7 +158,7 @@ class PackageCommands:
 
         eligible: builtins.list[tuple[str, Environment]] = []
         for name, env in environments.items():
-            if params.plugins and name not in params.plugins:
+            if params.plugin_names is not None and name not in params.plugin_names:
                 continue
 
             plugin_type = type(env)
@@ -182,3 +187,43 @@ class PackageCommands:
         )
 
         return results
+
+    # --- Inventory ---
+
+    @staticmethod
+    async def inventory(
+        *,
+        runtimes: set[str] | None = None,
+        plugin_names: set[str] | None = None,
+        include_global: bool = True,
+        include_updates: bool = False,
+        include_prereleases: bool = False,
+        plugins: DiscoveredPlugins | None = None,
+        max_concurrency: int = 8,
+    ) -> InventoryReport:
+        """List runtimes and the packages installed in each location, read-only.
+
+        Packages of runtime-bound plugins (pip, uv) are listed once per
+        interpreter; plugins with one global store (pipx, winget) once.
+        Failures are reported per provider and location, never as empty lists.
+
+        Args:
+            runtimes: Runtime tags to list interpreter packages for; ``None`` means all.
+            plugin_names: Package plugins to list; ``None`` means all.
+            include_global: Whether to include plugins with one global store.
+            include_updates: Whether to look up newer versions (slower, uses the network).
+            include_prereleases: Whether newer versions may be pre-releases.
+            plugins: Pre-discovered plugins.
+            max_concurrency: Maximum locations queried at once.
+        """
+        if plugins is None:
+            plugins = await asyncio.to_thread(discover_all_plugins, use_cache=True)
+        return await build_inventory(
+            plugins,
+            runtimes=runtimes,
+            plugin_names=plugin_names,
+            include_global=include_global,
+            include_updates=include_updates,
+            include_prereleases=include_prereleases,
+            max_concurrency=max_concurrency,
+        )

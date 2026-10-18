@@ -56,8 +56,9 @@ class CheckResult:
 class CheckParameters(PorringerModel):
     """Parameters for checking updates via plugins."""
 
-    plugins: list[str] | None = Field(
-        default=None, description='List of plugin names to check. None means all plugins.'
+    plugin_names: set[str] | None = Field(
+        default=None,
+        description='Plugin names to check. None means all plugins; an empty set checks none.',
     )
     include_prereleases: bool = Field(default=False, description='Include pre-release versions')
     max_concurrency: int = Field(

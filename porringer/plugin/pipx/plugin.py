@@ -9,11 +9,17 @@ import os
 from pathlib import Path
 from typing import override
 
-from porringer.core.plugin_schema.environment import BootstrapRequirement
+from porringer.core.plugin_schema.environment import BootstrapRequirement, PackageScope
 from porringer.core.plugin_schema.python_environment import PythonEnvironment
 from porringer.core.plugin_schema.runtime import RuntimeContext
 from porringer.core.plugin_schema.tool_based import find_tool_python
-from porringer.core.schema import Package, PackageRef, PackageRelation, PackageRelationKind, PluginKind
+from porringer.core.schema import (
+    Package,
+    PackageRef,
+    PackageRelation,
+    PackageRelationKind,
+    PluginKind,
+)
 from porringer.utility.concurrency import gather_bounded
 
 # Bounded concurrency for per-venv metadata reads offloaded to threads.
@@ -39,6 +45,31 @@ def _get_pipx_venvs_dir() -> Path:
         return Path.home() / 'pipx' / 'venvs'
     else:
         return Path.home() / '.local' / 'pipx' / 'venvs'
+
+
+def _venv_home(venv_dir: Path) -> Path | None:
+    """Return the base interpreter directory a venv was created from (``home`` in ``pyvenv.cfg``)."""
+    config = venv_dir / 'pyvenv.cfg'
+    if not config.is_file():
+        return None
+    for line in config.read_text(encoding='utf-8', errors='replace').splitlines():
+        key, _, value = line.partition('=')
+        if key.strip().lower() == 'home':
+            return Path(value.strip())
+    return None
+
+
+def _tools_built_on(executable: Path) -> list[str]:
+    """Return the pipx tools whose venv's base interpreter lives next to *executable*."""
+    venvs = _get_pipx_venvs_dir()
+    if not venvs.is_dir():
+        return []
+    base = os.path.normcase(str(executable.parent))
+    return sorted(
+        venv.name
+        for venv in venvs.iterdir()
+        if (home := _venv_home(venv)) is not None and os.path.normcase(str(home)) == base
+    )
 
 
 def _read_venv_packages_sync(venv_dir: Path) -> list[Package]:
@@ -110,6 +141,17 @@ class PIPXEnvironment(PythonEnvironment):
 
     @classmethod
     @override
+    def package_scope(cls) -> PackageScope:
+        """Pipx keeps one tool store per user, whichever Python runs it."""
+        return PackageScope.GLOBAL
+
+    @override
+    async def runtime_dependents(self, executable: Path) -> list[str]:
+        """Return the pipx tools whose venv was built on *executable*'s interpreter."""
+        return await asyncio.to_thread(_tools_built_on, executable)
+
+    @classmethod
+    @override
     def bootstrap_requirement(cls) -> BootstrapRequirement | None:
         """Pipx itself is installed via pip before it can install other tools."""
         return BootstrapRequirement(installer='pip', package=PackageRef.model_validate('pipx'))
@@ -137,20 +179,40 @@ class PIPXEnvironment(PythonEnvironment):
 
     @override
     def install_command(
-        self, package: PackageRef, *, include_prereleases: bool = False, runtime_context: RuntimeContext | None = None
+        self,
+        package: PackageRef,
+        *,
+        include_prereleases: bool = False,
+        runtime_context: RuntimeContext | None = None,
     ) -> list[str]:
         """Returns the CLI command to install a package via pipx."""
-        cmd = [self.python_command(runtime_context), '-m', 'pipx', 'install', package.specifier]
+        cmd = [
+            self.python_command(runtime_context),
+            '-m',
+            'pipx',
+            'install',
+            package.specifier,
+        ]
         if include_prereleases:
             cmd.extend(['--pip-args=--pre'])
         return cmd
 
     @override
     def upgrade_command(
-        self, package: PackageRef, *, include_prereleases: bool = False, runtime_context: RuntimeContext | None = None
+        self,
+        package: PackageRef,
+        *,
+        include_prereleases: bool = False,
+        runtime_context: RuntimeContext | None = None,
     ) -> list[str]:
         """Returns the CLI command to upgrade a package via pipx."""
-        cmd = [self.python_command(runtime_context), '-m', 'pipx', 'upgrade', package.specifier]
+        cmd = [
+            self.python_command(runtime_context),
+            '-m',
+            'pipx',
+            'upgrade',
+            package.specifier,
+        ]
         if include_prereleases:
             cmd.extend(['--pip-args=--pre'])
         return cmd
@@ -158,11 +220,20 @@ class PIPXEnvironment(PythonEnvironment):
     @override
     def uninstall_command(self, package: PackageRef, *, runtime_context: RuntimeContext | None = None) -> list[str]:
         """Returns the CLI command to uninstall a package via pipx."""
-        return [self.python_command(runtime_context), '-m', 'pipx', 'uninstall', package.name]
+        return [
+            self.python_command(runtime_context),
+            '-m',
+            'pipx',
+            'uninstall',
+            package.name,
+        ]
 
     @override
     async def packages(
-        self, *, project_path: Path | None = None, runtime_context: RuntimeContext | None = None
+        self,
+        *,
+        project_path: Path | None = None,
+        runtime_context: RuntimeContext | None = None,
     ) -> list[Package]:
         """Gathers installed packages in the given environment.
 

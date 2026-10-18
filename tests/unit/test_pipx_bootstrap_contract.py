@@ -11,7 +11,7 @@ from dirty_equals import IsPartialDict
 from packaging.version import Version
 
 from porringer.backend.command.core.discovery import DiscoveredPlugins
-from porringer.backend.command.core.execution import execute_single
+from porringer.backend.command.core.execution import execute_manifest
 from porringer.core.plugin_schema.environment import Environment
 from porringer.core.plugin_schema.runtime import RuntimeContext
 from porringer.core.schema import Distribution, Ecosystem, PackageRef, PluginKind, PluginParameters
@@ -83,7 +83,7 @@ async def test_pipx_installed_by_package_phase_is_used_by_tool_phase(
     monkeypatch.setattr('porringer.plugin.pip.plugin.shutil.which', lambda _name: None)
     monkeypatch.setenv('PIPX_HOME', str(tmp_path / 'pipx-home'))
 
-    result = await execute_single(
+    result = await execute_manifest(
         _preview(tmp_path),
         SetupParameters(project_directory=False),
         asyncio.Queue(),
