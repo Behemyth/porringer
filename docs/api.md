@@ -16,7 +16,7 @@ The top-level package re-exports the common application entry points:
 
 | Import | Use |
 | --- | --- |
-| `API` | Programmatic entry point for sync, package, extension, project, tool, profile, and client operations. |
+| `API` | Programmatic entry point for sync, package, extension, tool, and profile operations. |
 | `DiscoveredPlugins` | Reusable plugin discovery result for repeated operations. |
 | `LocalConfiguration` | Caller-provided cache and configuration paths. |
 | `RuntimeContext` | Resolved runtime executable paths. |
@@ -32,11 +32,11 @@ The top-level package re-exports the common application entry points:
 import asyncio
 from pathlib import Path
 
-from porringer import API, LocalConfiguration, SetupParameters
+from porringer import API, SetupParameters
 
 
 async def main() -> None:
-    api = API(LocalConfiguration())
+    api = API()
     report = await api.sync.inspect(SetupParameters(paths=Path('.')))
     print(report.summary.actions)
 
@@ -46,15 +46,17 @@ asyncio.run(main())
 
 ## API Namespaces
 
-`API(LocalConfiguration())` creates namespace objects for backend operations:
+`API()` creates namespace objects for backend operations. Pass a `LocalConfiguration` to override defaults:
 
 | Namespace | Main operations |
 | --- | --- |
 | `api.sync` | Inspect manifests and run them with optional progress events. Use `inspect_paths([...])` for a stateless per-directory dashboard view. |
-| `api.package` | Check package updates through environment plugins. |
-| `api.extension` | List, install, upgrade, and uninstall Porringer extension packages. |
-| `api.tool` | Check, upgrade, or uninstall packages and tools for the current project. |
+| `api.package` | Check package updates through environment plugins, and list runtimes and installed packages per location with `inventory()`. |
+| `api.extension` | List installed Porringer plugins. |
+| `api.tool` | Check, upgrade, or uninstall the packages and tools a manifest declares; `add`, `upgrade` and `remove` also edit the manifest (see [Managing entries](manage.md)). |
 | `api.profile` | Resolve, inspect, and run HTTPS setup profiles. |
+
+`api.global_manifest_path` is the user's global manifest (it may not exist yet). Pass it in `paths` like any other manifest; Porringer recognises it and infers nothing from its location.
 
 Long-lived clients should discover plugins once and pass the result into repeated calls:
 
@@ -62,12 +64,12 @@ Long-lived clients should discover plugins once and pass the result into repeate
 import asyncio
 from pathlib import Path
 
-from porringer import API, LocalConfiguration, SetupParameters
+from porringer import API, SetupParameters
 from porringer.schema import InspectionMode
 
 
 async def main() -> None:
-    api = API(LocalConfiguration())
+    api = API()
     plugins = await API.discover_plugins(resolve_runtime=False)
 
     report = await api.sync.inspect(
@@ -80,6 +82,40 @@ async def main() -> None:
 
 asyncio.run(main())
 ```
+
+### Action filters
+
+`SetupParameters` narrows the action plan with `plugin_names`, `action_kinds`, `include_packages`, `action_ids`, and `entry_ids`. For every filter, `None` selects everything and an empty set selects nothing. Filters compose as an intersection.
+
+`api.tool.check_updates`, `api.tool.upgrade_project`, and `api.tool.uninstall` accept `paths=` and only touch package, tool, and runtime actions. All three accept `action_ids` to target exact rows; IDs are `<manifest_index>:<action_index>` positions, so re-inspect after a manifest changes. They also accept `entry_ids`, which survive manifest edits and are the key to store for per-entry settings. `uninstall` requires `include_packages`, `action_ids` or `entry_ids`, removes tools before the packages and runtimes they may depend on, and skips packages that are not installed:
+
+```python
+report = await api.tool.uninstall(paths=Path('.'), include_packages={'ruff'})
+```
+
+### Execution and cancellation
+
+Runs on one `API` instance are serialized, because execution changes the process-wide `PATH`. Starting a run from inside another run on the same instance, for example from `on_event`, raises `PorringerBusyError`. Separate instances and separate processes are not coordinated.
+
+To cancel a run, cancel the task that awaits it. Porringer stops any active subprocess and re-raises `asyncio.CancelledError`.
+
+`api.tool.remove` on a runtime entry raises `RuntimeInUseError` while entries or installed tools still depend on that runtime; `api.tool.runtime_dependents` reports them without changing anything (see [Managing entries](manage.md)).
+
+### Plans: run what was previewed
+
+`api.sync.plan(parameters)` inspects like `inspect` and returns a `SyncPlan`: the report (`plan.report`) plus the loaded actions, frozen. `api.sync.run(plan=plan)` runs those actions without loading the manifests again, so a confirmed preview is exactly what runs. Remote manifests are downloaded once, when the plan is made.
+
+The plan fingerprints every file it was built from: each input file, each manifest, and the `pyproject.toml` at each manifest's root. If any changed, appeared, or vanished, `run` raises `PlanStaleError` with the paths in `changed` and runs nothing; make a new plan. A plan runs once, whatever the outcome; call `plan.discard()` to release one you won't run.
+
+```python
+plan = await api.sync.plan(SetupParameters(paths=Path('.')))
+if confirm(plan.report):
+    report = await api.sync.run(plan=plan)
+else:
+    plan.discard()
+```
+
+Pass `on_event` to `plan` (or `inspect`) to fill in a view while inspection runs. Events arrive in this order: one `PluginsDiscoveredEvent` with plugin availability, a `ManifestFailedEvent` for each input that could not be loaded, a `ManifestLoadedEvent` for each manifest (with its typed actions, before any checks run), then one `ActionInspectedEvent` per action, manifest by manifest. Each `ActionInspectedEvent` carries the typed `action` and `result` plus the JSON-stable `inspection`. Actions are reported as soon as their checks finish, so with complete inspection they can arrive out of source order within a manifest; match them by `event.action_ref`. The final report is always in source order.
 
 ## Schema Package
 

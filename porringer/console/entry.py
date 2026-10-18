@@ -14,26 +14,39 @@ from porringer.console.command.check import app as check_app
 from porringer.console.command.doc import doc_default
 from porringer.console.command.env import app as env_app
 from porringer.console.command.install import install_default
+from porringer.console.command.manage import (
+    add_default,
+    remove_default,
+    upgrade_default,
+)
 from porringer.console.command.open import open_default
 from porringer.console.command.plugin import app as plugin_app
 from porringer.console.command.preview import preview_default
 from porringer.console.command.schema import app as schema_app
 from porringer.console.command.self import app as self_app
 from porringer.console.output import build_console, no_color_requested
-from porringer.console.schema import LOG_LEVELS, MAX_VERBOSITY_LEVEL, VERBOSITY_DEBUG_THRESHOLD, ConsoleConfiguration
+from porringer.console.schema import (
+    LOG_LEVELS,
+    MAX_VERBOSITY_LEVEL,
+    VERBOSITY_DEBUG_THRESHOLD,
+    ConsoleConfiguration,
+)
 
 __version__ = version('porringer')
 
 app = typer.Typer()
+app.command(name='add')(add_default)
 app.add_typer(check_app, name='check')
 app.command(name='doc')(doc_default)
 app.add_typer(env_app, name='env')
 app.command(name='install')(install_default)
 app.command(name='open')(open_default)
 app.command(name='preview')(preview_default)
+app.command(name='remove')(remove_default)
 app.add_typer(schema_app, name='schema')
 app.add_typer(plugin_app, name='plugin')
 app.add_typer(self_app, name='self')
+app.command(name='upgrade')(upgrade_default)
 
 
 class TyperHandler(logging.Handler):
@@ -62,15 +75,25 @@ def version_callback(value: bool) -> None:
 @app.callback(invoke_without_command=True, no_args_is_help=True)
 def application(
     context: typer.Context,
-    verbose: Annotated[int, typer.Option('--verbose', '-v', count=True, help='', min=0, max=MAX_VERBOSITY_LEVEL)] = 0,
+    verbose: Annotated[
+        int,
+        typer.Option('--verbose', '-v', count=True, help='', min=0, max=MAX_VERBOSITY_LEVEL),
+    ] = 0,
     debug: Annotated[bool, typer.Option('--debug', help='')] = False,
     quiet: Annotated[
         bool,
-        typer.Option('--quiet', '-q', help='Suppress informational output; only show warnings and errors'),
+        typer.Option(
+            '--quiet',
+            '-q',
+            help='Suppress informational output; only show warnings and errors',
+        ),
     ] = False,
     no_color: Annotated[
         bool,
-        typer.Option('--no-color', help='Disable coloured output (also honoured via the NO_COLOR env var)'),
+        typer.Option(
+            '--no-color',
+            help='Disable coloured output (also honoured via the NO_COLOR env var)',
+        ),
     ] = False,
     version: Annotated[
         bool | None,

@@ -22,6 +22,12 @@ When the target is a directory, Porringer looks for manifests in this order:
 
 A target can also be a manifest file, an HTTPS setup profile, or a `porringer://` install link.
 
+## Global Manifest
+
+Each user also has a global manifest at `porringer.json` in Porringer's config directory (`porringer env info` shows where). It holds the packages and tools you want on this machine regardless of project. Pass `--global` to `install`, `preview` or `check` to use it. It can't be combined with a target or `--project-dir`.
+
+Only its declared entries become actions, plus any installer they need first (for example `pipx`). Nothing is inferred from the folder it lives in: no project install, no runtime from a nearby `pyproject.toml`, no clone from `url`.
+
 ## Manifest Shape
 
 | Field | Type | Description |
@@ -70,6 +76,29 @@ Manifest entries are grouped by kind, then by ecosystem. Ecosystem names are dec
 
 Project install is implicit. Project-install plugins inspect the repository for marker files, lock files, and tool-specific configuration. Porringer then chooses one project-install owner per ecosystem.
 
+## Entry Fields
+
+An entry is either a string (`"pdm>=2"`) or an object:
+
+| Field | Description |
+| --- | --- |
+| `name` | Package name with an optional version constraint. Required. |
+| `description` | Optional display text. |
+| `platforms` | Optional list of platforms the entry applies to; empty means all. |
+| `include_prereleases` | Consider pre-releases when checking for updates. |
+| `installer` | Installer plugin for this entry only, such as `"pipx"`. It must install that kind for the entry's ecosystem, otherwise the manifest is rejected. It overrides `preferences` and is never swapped for another installer; if it isn't installed yet, its prerequisite is installed first (for example `pip` for `pipx`). |
+| `runtime` | Runtime tag the installer runs under, such as `"3.14"`. Packages and tools only. If the tag doesn't resolve on this machine, that entry fails. Command previews still show the default interpreter. |
+
+```json
+{
+  "tools": {
+    "python": [
+      { "name": "pdm", "installer": "pipx", "runtime": "3.14" }
+    ]
+  }
+}
+```
+
 ## Inference
 
 Several manifest sections are optional because Porringer infers them from repository metadata and conventions. An explicit manifest entry always overrides the inferred value.
@@ -117,6 +146,7 @@ porringer install ./my-project --only-action 0:2
 | `--jsonl` | Emit progress events and the final result as newline-delimited JSON. |
 | `--record` | Write a replayable JSON run record to the given path. |
 | `--yes`, `-y` | Skip the confirmation prompt. |
+| `--global` | Install your global manifest instead of a project's. |
 
 ## Confirmation and Progress
 
@@ -335,6 +365,7 @@ Consumers should use `event_type` as the JSONL discriminator.
 | `action_started` | `action` | Action execution began. |
 | `action_progress` | `action`, `action_progress` | Plugin or subprocess progress. |
 | `action_completed` | `action`, `result` | Action execution finished. |
+| `action_inspected` | `action`, `inspection` | One action's checks finished during `plan` or `inspect`. |
 | `result` | result envelope fields | Final `ResultEnvelope` for the operation. |
 
 ### Downstream API Boundaries
@@ -342,6 +373,7 @@ Consumers should use `event_type` as the JSONL discriminator.
 Porringer owns reusable backend contracts for CLIs, GUIs, and agents:
 
 - `api.sync.inspect(...)` for manifest inspection.
+- `api.sync.plan(...)` and `api.sync.run(plan=...)` to run exactly what was previewed (see [API](api.md)).
 - `api.sync.run(..., on_event=...)` for execution with live progress.
 - `SetupParameters.action_ids` for stable action selectors.
 - `api.tool.check_updates(...)` and `api.tool.upgrade_project(...)` for managed package and tool operations.
