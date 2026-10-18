@@ -3,15 +3,24 @@
 Manifest schemas.
 """
 
+import hashlib
+import os
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from pathlib import Path
 from typing import Any
 
+from packaging.utils import canonicalize_name
 from pydantic import Field, HttpUrl, model_validator
 
-from porringer.core.schema import Ecosystem, PackageRef, PlatformScoped, PluginKind, PorringerModel
+from porringer.core.schema import (
+    Ecosystem,
+    PackageRef,
+    PlatformScoped,
+    PluginKind,
+    PorringerModel,
+)
 lazy from porringer.utility.exception import ManifestValidationCode
 
 MANIFEST_SCHEMA_URL = 'https://synodic.github.io/porringer/schema.json'
@@ -84,6 +93,15 @@ class PackageSpec(PlatformScoped):
         default=False,
         description='Include pre-release versions when checking this package for updates',
     )
+    installer: str | None = Field(
+        default=None,
+        description='Installer plugin to use for this entry (e.g. "pipx"); must belong to the entry\'s ecosystem. '
+        'Overrides the ecosystem preference and is never substituted.',
+    )
+    runtime: str | None = Field(
+        default=None,
+        description='Runtime tag the installer runs under (e.g. "3.14"); packages and tools only',
+    )
 
     @model_validator(mode='before')
     @classmethod
@@ -111,17 +129,23 @@ class SetupManifest(PorringerModel):
 
     version: str = Field(default='1', description='Manifest schema version')
     name: str | None = Field(default=None, description='Human-readable project/environment name')
-    description: str | None = Field(default=None, description='Short description shown in the install preview header')
+    description: str | None = Field(
+        default=None,
+        description='Short description shown in the install preview header',
+    )
     author: str | None = Field(default=None, description='Author or organization name')
     url: HttpUrl | None = Field(default=None, description='Project URL for reference')
     packages: dict[Ecosystem, list[PackageSpec]] = Field(
-        default_factory=dict, description='Packages to install per ecosystem (e.g. {"python": ["requests"]})'
+        default_factory=dict,
+        description='Packages to install per ecosystem (e.g. {"python": ["requests"]})',
     )
     tools: dict[Ecosystem, list[PackageSpec]] = Field(
-        default_factory=dict, description='CLI tools to install per ecosystem (e.g. {"python": ["pdm"]})'
+        default_factory=dict,
+        description='CLI tools to install per ecosystem (e.g. {"python": ["pdm"]})',
     )
     runtimes: dict[Ecosystem, list[PackageSpec]] = Field(
-        default_factory=dict, description='Language runtimes to install per ecosystem (e.g. {"python": ["3.12"]})'
+        default_factory=dict,
+        description='Language runtimes to install per ecosystem (e.g. {"python": ["3.12"]})',
     )
     scm: dict[Ecosystem, list[PackageSpec]] = Field(
         default_factory=dict,
@@ -146,7 +170,20 @@ class SetupManifest(PorringerModel):
             return {k: v for k, v in data.items() if k != '$schema'}
         return data
 
-    def iter_sections(self) -> Iterator[tuple[PluginKind, Ecosystem, list[PackageSpec]]]:
+    @model_validator(mode='after')
+    def _runtime_only_on_packages_and_tools(self) -> SetupManifest:
+        """Reject ``runtime`` on runtime and SCM entries, where it has no meaning."""
+        for kind, ecosystem, packages in self.iter_sections():
+            if kind in {PluginKind.PACKAGE, PluginKind.TOOL}:
+                continue
+            for index, spec in enumerate(packages):
+                if spec.runtime is not None:
+                    raise ValueError(f"{kind.value}.{ecosystem}[{index}]: 'runtime' applies only to packages and tools")
+        return self
+
+    def iter_sections(
+        self,
+    ) -> Iterator[tuple[PluginKind, Ecosystem, list[PackageSpec]]]:
         """Yield `(kind, ecosystem, packages)` for every non-empty section.
 
         Replaces the repeated `for kind in PluginKind: getattr(…)`
@@ -156,6 +193,30 @@ class SetupManifest(PorringerModel):
             section: dict[Ecosystem, list[PackageSpec]] = getattr(self, kind.value, {})
             for ecosystem, packages in section.items():
                 yield kind, ecosystem, packages
+
+
+def entry_id(
+    manifest_path: Path | None,
+    kind: PluginKind,
+    ecosystem: Ecosystem,
+    spec: PackageSpec,
+) -> str:
+    """Stable identity of a manifest entry.
+
+    Built from the manifest file, kind, ecosystem, package name, installer and
+    runtime, so it survives constraint and description edits and reordering.
+    """
+    name = canonicalize_name(spec.name.name) if ecosystem == 'python' else spec.name.name.lower()
+    manifest = os.path.normcase(str(manifest_path.resolve())) if manifest_path is not None else ''
+    key = '\0'.join((
+        manifest,
+        kind.value,
+        ecosystem,
+        name,
+        spec.installer or '',
+        spec.runtime or '',
+    ))
+    return hashlib.sha256(key.encode()).hexdigest()[:16]
 
 
 @dataclass(slots=True)

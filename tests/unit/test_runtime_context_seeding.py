@@ -2,7 +2,7 @@
 
 Tests for runtime-context seeding in ExecutionState.
 
-Verifies that ``execute_single()`` and ``ExecutionState`` correctly
+Verifies that ``execute_manifest()`` and ``ExecutionState`` correctly
 inherit a pre-resolved ``RuntimeContext`` from ``DiscoveredPlugins``
 so that manifests without a ``runtimes:`` section still carry
 interpreter paths into the package/tool phases.
@@ -54,7 +54,7 @@ def _make_state_from_plugins(
     actions = runtime_actions or []
     preview = SetupResults(actions=actions, root_directory=Path('.'))
 
-    # Reproduce the seeding logic that execute_single() should perform:
+    # Reproduce the seeding logic that execute_manifest() should perform:
     copied = plugins.copy()
     seeded = (
         RuntimeContext(executables=dict(copied.runtime_context.executables))

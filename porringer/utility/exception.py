@@ -3,17 +3,22 @@
 Exception definitions.
 """
 
+from collections.abc import Sequence
 from enum import Enum
+from pathlib import Path
 
 __all__ = [
     'CommandTimeoutError',
     'ManifestError',
     'ManifestValidationCode',
     'NotSupportedError',
+    'PlanStaleError',
     'PluginDependencyError',
     'PluginError',
+    'PorringerBusyError',
     'PorringerError',
     'ProcessError',
+    'RuntimeInUseError',
     'SetupError',
     'UpdateError',
 ]
@@ -54,6 +59,36 @@ class PluginError(PorringerError):
 
 class NotSupportedError(PorringerError):
     """Raised when something is not supported."""
+
+
+class PorringerBusyError(PorringerError):
+    """Raised when a sync run is started from inside a running sync on the same API."""
+
+
+class PlanStaleError(PorringerError):
+    """Raised when running a sync plan whose files changed after it was made.
+
+    ``changed`` lists the files; make a new plan to preview the changes.
+    """
+
+    def __init__(self, changed: Sequence[Path]) -> None:
+        """Initializes the error."""
+        self.changed = tuple(changed)
+        listed = ', '.join(str(path) for path in self.changed)
+        super().__init__(f'The plan is out of date; these files changed since it was made: {listed}')
+
+
+class RuntimeInUseError(PorringerError):
+    """Raised when removing a runtime that entries or installed tools still depend on.
+
+    ``dependents`` describes each one; remove them first or pass ``cascade=True``.
+    """
+
+    def __init__(self, runtime: str, dependents: Sequence[str]) -> None:
+        """Initializes the error."""
+        self.runtime = runtime
+        self.dependents = tuple(dependents)
+        super().__init__(f'Runtime {runtime} is still used by: ' + '; '.join(self.dependents))
 
 
 class SetupError(PorringerError):

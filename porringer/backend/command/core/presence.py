@@ -23,9 +23,14 @@ from porringer.schema import (
 )
 from porringer.schema.execution import CloneStatus, CloneStatusKind
 
-from .resolution import ResolutionContext, resolve_operation, resolved_to_result
+from .resolution import (
+    ResolutionContext,
+    apply_runtime_tag,
+    resolve_operation,
+    resolved_to_result,
+)
 
-__all__ = ['inspect_action', 'clone_status_to_result']
+__all__ = ['clone_status_to_result', 'inspect_action']
 
 logger = logging.getLogger(__name__)
 
@@ -90,7 +95,11 @@ async def inspect_action(
         case PluginKind.PROJECT:
             return SetupActionResult(action=action, success=True)
         case _:
-            return SetupActionResult(action=action, success=False, message=f'Unknown action kind: {action.kind}')
+            return SetupActionResult(
+                action=action,
+                success=False,
+                message=f'Unknown action kind: {action.kind}',
+            )
 
 
 def clone_status_to_result(
@@ -208,7 +217,11 @@ async def _inspect_package_action(
         runtime_context=ctx.runtime_context,
     )
 
-    resolved = await resolve_operation(action, environments, strategy, ctx)
+    ctx_or_failure = await apply_runtime_tag(action, environments, ctx)
+    if isinstance(ctx_or_failure, SetupActionResult):
+        return ctx_or_failure
+
+    resolved = await resolve_operation(action, environments, strategy, ctx_or_failure)
 
     if isinstance(resolved.operation, Skip):
         logger.info("Inspection: skipping '%s': %s", action.package, resolved.message)

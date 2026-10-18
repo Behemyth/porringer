@@ -9,6 +9,7 @@ from abc import abstractmethod
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
+from enum import StrEnum
 from pathlib import Path
 from typing import Literal
 
@@ -65,7 +66,8 @@ class PackageParameters(PorringerModel):
 
     package: PackageRef = Field(description='The target package')
     dry: bool = Field(
-        default=False, description='If True, rehearses the operation without modifying what is actually installed'
+        default=False,
+        description='If True, rehearses the operation without modifying what is actually installed',
     )
     include_prereleases: bool = Field(
         default=False,
@@ -91,7 +93,8 @@ class CheckUpdatesParameters(PorringerModel):
     """Parameters for checking updates via a plugin."""
 
     packages: list[PackageRef] = Field(
-        default_factory=list, description='Packages to check for updates. Empty means check all installed packages.'
+        default_factory=list,
+        description='Packages to check for updates. Empty means check all installed packages.',
     )
     include_prereleases: bool = Field(default=False, description='Include pre-release versions')
     max_concurrency: int = Field(
@@ -122,6 +125,16 @@ class CheckUpdatesParameters(PorringerModel):
     )
 
 
+class PackageScope(StrEnum):
+    """Where an environment plugin's installed packages live."""
+
+    RUNTIME = 'runtime'
+    """In each interpreter the plugin runs against, so they're listed once per runtime."""
+
+    GLOBAL = 'global'
+    """In one store for the machine or user, whichever interpreter runs the tool."""
+
+
 class Environment(ToolBasedPlugin):
     """Plugin definition for package environments.
 
@@ -129,6 +142,20 @@ class Environment(ToolBasedPlugin):
     configuration.  A :class:`RuntimeContext` is passed explicitly to
     every method that needs to know which interpreter to target.
     """
+
+    @classmethod
+    def package_scope(cls) -> PackageScope:
+        """Return where this plugin's installed packages live. Defaults to one global store."""
+        return PackageScope.GLOBAL
+
+    async def runtime_dependents(self, executable: Path) -> list[str]:
+        """Return packages this plugin installed that would break if *executable*'s runtime were removed.
+
+        Plugins whose installs are built on an interpreter (such as pipx
+        venvs) override this. The default reports none.
+        """
+        _ = self, executable
+        return []
 
     @abstractmethod
     def install_command(
@@ -196,9 +223,10 @@ class Environment(ToolBasedPlugin):
         displaying commands in dry-run / preview mode.
 
         **Prefer reversal flags** when the package manager supports
-        them.  For example, prefer ``apt purge`` over ``apt remove``,
-        ``py uninstall --purge`` over plain ``py uninstall``, and
-        ``brew uninstall --zap`` over plain ``brew uninstall``.
+        them for a single package.  For example, prefer ``apt purge`` over
+        ``apt remove`` and ``brew uninstall --zap`` over plain
+        ``brew uninstall``.  Check the flag's scope first: ``py uninstall
+        --purge`` removes every runtime, so it must never be used.
         Reversal flags keep per-package cleanup in the command layer
         (where it naturally belongs) and avoid the need for a
         ``teardown()`` override just to delete leftover files.
@@ -607,7 +635,9 @@ class Environment(ToolBasedPlugin):
             else aiohttp.ClientSession(timeout=HTTP_TIMEOUT)
         ) as session:
 
-            def _make_check(pkg_ref: PackageRef) -> Callable[[], Awaitable[Package | None]]:
+            def _make_check(
+                pkg_ref: PackageRef,
+            ) -> Callable[[], Awaitable[Package | None]]:
                 return lambda: Environment._check_single_npm_package(session, pkg_ref, include_prereleases, logger)
 
             gathered = await gather_bounded(

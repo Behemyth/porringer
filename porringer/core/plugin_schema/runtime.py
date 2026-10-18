@@ -27,6 +27,12 @@ from packaging.version import InvalidVersion, Version
 
 logger = logging.getLogger(__name__)
 
+
+def runtime_tag_matches(tag: str, wanted: str) -> bool:
+    """Whether runtime *tag* is selected by *wanted*; ``3.14`` also selects ``3.14-64``."""
+    return tag == wanted or tag.partition('-')[0] == wanted
+
+
 # ---------------------------------------------------------------------------
 # Runtime context — externalised runtime state
 # ---------------------------------------------------------------------------

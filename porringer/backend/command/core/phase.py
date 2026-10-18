@@ -7,7 +7,7 @@ project-sync) is represented by a :class:`Phase` instance that
 encapsulates the *refresh → resolve-deferred → execute → post-hook* cycle.
 
 The :func:`run_phases` driver replaces the hand-coded per-phase blocks in
-``execute_single()`` with a uniform loop.
+``execute_manifest()`` with a uniform loop.
 """
 
 import asyncio

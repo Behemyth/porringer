@@ -43,7 +43,7 @@ class TestBootstrapPreview:
 
     @staticmethod
     def test_runtime_action_present(preview: SetupResults) -> None:
-        """A RUNTIME action for Python 3.14 should be in the plan.
+        """A RUNTIME action for Python 3.15 should be in the plan.
 
         The action may have `installer=None` (deferred) when no
         runtime provider (pim/pyenv) is available on the current
@@ -52,7 +52,7 @@ class TestBootstrapPreview:
         runtime_actions = [a for a in preview.actions if a.kind == PluginKind.RUNTIME and a.ecosystem == 'python']
         assert len(runtime_actions) == 1
         assert runtime_actions[0].package is not None
-        assert runtime_actions[0].package.name == '3.14'
+        assert runtime_actions[0].package.name == '3.15'
 
     @staticmethod
     def test_package_actions_present(preview: SetupResults) -> None:

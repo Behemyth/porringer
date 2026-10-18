@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-import asyncio
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
@@ -12,7 +11,11 @@ from pydantic import Field
 
 from porringer.core.schema import PluginKind, PorringerModel
 from porringer.schema.execution import SetupAction, SetupActionResult, SetupResults
-from porringer.schema.inspection import ActionSnapshot, DiscoveredPluginSnapshot
+from porringer.schema.inspection import (
+    ActionInspection,
+    ActionSnapshot,
+    DiscoveredPluginSnapshot,
+)
 from porringer.schema.observability import SCHEMA_VERSION, ActionRef
 from porringer.schema.plugin import PluginCapability
 
@@ -130,6 +133,25 @@ class ActionProgressEvent:
     action_ref: ActionRef | None = None
 
 
+@dataclass(slots=True)
+class ActionInspectedEvent:
+    """Emitted during inspection as soon as one action's checks finish.
+
+    Carries the typed action and result alongside the stable inspection
+    record, so a client can fill in a row without waiting for the whole
+    report.
+    """
+
+    action: SetupAction
+    result: SetupActionResult
+    inspection: ActionInspection
+
+    @property
+    def action_ref(self) -> ActionRef:
+        """Stable reference of the inspected action."""
+        return self.inspection.ref
+
+
 class SetupActionResultSnapshot(PorringerModel):
     """JSON-stable projection of an action result."""
 
@@ -190,6 +212,7 @@ class ProgressEventSnapshot(PorringerModel):
     manifest: ManifestProgressSnapshot | None = None
     failed_path: FailedPathProgressSnapshot | None = None
     discovered_plugins: tuple[DiscoveredPluginSnapshot, ...] = Field(default_factory=tuple)
+    inspection: ActionInspection | None = None
 
 
 def _snapshot_action(action: SetupAction, action_ref: ActionRef | None, action_index: int | None) -> ActionSnapshot:
@@ -212,6 +235,7 @@ def _snapshot_action(action: SetupAction, action_ref: ActionRef | None, action_i
         package_description=action.package_description,
         include_prereleases=action.include_prereleases,
         runtime_tag=action.runtime_tag,
+        entry_id=action.entry_id,
     )
 
 
@@ -265,6 +289,14 @@ def progress_event_snapshot(event: ProgressEvent, *, correlation_id: str | None 
                 for entry in event.discovered_plugins
             ),
         )
+    return _action_event_snapshot(event, correlation_id)
+
+
+def _action_event_snapshot(
+    event: ActionStartedEvent | ActionCompletedEvent | ActionInspectedEvent | ActionProgressEvent,
+    correlation_id: str | None,
+) -> ProgressEventSnapshot:
+    """Convert a per-action progress event to a stable JSON snapshot."""
     if isinstance(event, ActionStartedEvent):
         return ProgressEventSnapshot(
             event_type='action_started',
@@ -281,6 +313,15 @@ def progress_event_snapshot(event: ProgressEvent, *, correlation_id: str | None 
             action_id=event.action_ref.action_id if event.action_ref is not None else None,
             action=_snapshot_action(event.action, event.action_ref, event.action_index),
             result=_snapshot_result(event.result),
+        )
+    if isinstance(event, ActionInspectedEvent):
+        return ProgressEventSnapshot(
+            event_type='action_inspected',
+            correlation_id=correlation_id,
+            action_ref=event.action_ref,
+            action_id=event.action_ref.action_id,
+            action=event.inspection.action,
+            inspection=event.inspection,
         )
     return ProgressEventSnapshot(
         event_type='action_progress',
@@ -308,41 +349,5 @@ type ProgressEvent = (
     | ActionStartedEvent
     | ActionCompletedEvent
     | ActionProgressEvent
+    | ActionInspectedEvent
 )
-
-
-@dataclass(slots=True)
-class CancellationToken:
-    """Token for cooperative cancellation of async operations.
-
-    Used by GUI applications to request cancellation of long-running
-    async operations like batch installs.
-
-    Example:
-        token = CancellationToken()
-        task = asyncio.create_task(long_operation(token))
-        # Later...
-        token.cancel()
-    """
-
-    _cancelled: bool = field(default=False, init=False)
-    _event: asyncio.Event = field(default_factory=asyncio.Event, init=False)
-
-    def cancel(self) -> None:
-        """Request cancellation of the operation."""
-        self._cancelled = True
-        self._event.set()
-
-    @property
-    def is_cancelled(self) -> bool:
-        """Check if cancellation has been requested."""
-        return self._cancelled
-
-    async def wait_cancelled(self) -> None:
-        """Wait until cancellation is requested."""
-        await self._event.wait()
-
-    def raise_if_cancelled(self) -> None:
-        """Raise asyncio.CancelledError if cancellation was requested."""
-        if self._cancelled:
-            raise asyncio.CancelledError('Operation cancelled by token')

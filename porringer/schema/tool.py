@@ -3,11 +3,64 @@
 Managed tool/package operation schemas.
 """
 
+from enum import StrEnum
+from pathlib import Path
+
 from pydantic import Field
 
-from porringer.core.schema import PorringerModel
+from porringer.core.schema import PluginKind, PorringerModel
 from porringer.schema.inspection import FailedPathInspection
-from porringer.schema.observability import SCHEMA_VERSION, Diagnostic, FollowUpAction, ResultStatus
+from porringer.schema.manifest import PackageSpec
+from porringer.schema.observability import (
+    SCHEMA_VERSION,
+    Diagnostic,
+    FollowUpAction,
+    ResultStatus,
+)
+
+
+class RangeStrategy(StrEnum):
+    """How ``tool.upgrade`` treats an entry's version constraint."""
+
+    IN_RANGE = 'in_range'
+    """Upgrade to the newest version the constraint allows; the manifest is unchanged."""
+
+    REPLACE = 'replace'
+    """Upgrade to the newest version, then move the constraint up to it."""
+
+
+class ManifestEntry(PorringerModel):
+    """One entry of a manifest, as written, with its stable identity."""
+
+    entry_id: str
+    manifest_path: Path
+    kind: PluginKind
+    ecosystem: str
+    spec: PackageSpec
+
+
+class RuntimeDependent(PorringerModel):
+    """Something that breaks if a runtime is removed."""
+
+    description: str = Field(description='Human-readable description, such as "pdm (tools.python) in porringer.json"')
+    manifest_path: Path | None = Field(default=None, description='Manifest of a dependent entry')
+    entry_id: str | None = Field(default=None, description='Id of a dependent manifest entry')
+    plugin: str | None = Field(default=None, description='Plugin that installed a dependent tool')
+    package: str | None = Field(default=None, description='Name of a dependent tool')
+
+
+class RuntimeRemovalCheck(PorringerModel):
+    """What removing one runtime entry would affect."""
+
+    entry_id: str
+    runtime: str = Field(description='Runtime tag of the entry')
+    executable: Path | None = Field(default=None, description='Interpreter that would be removed, when it resolves')
+    default: bool = Field(default=False, description="Whether it is the provider's default interpreter")
+    dependents: tuple[RuntimeDependent, ...] = Field(default_factory=tuple)
+    installed_packages: tuple[str, ...] = Field(
+        default_factory=tuple,
+        description='Packages inside the interpreter that are removed along with it',
+    )
 
 
 class ManagedPackageResult(PorringerModel):
@@ -17,6 +70,7 @@ class ManagedPackageResult(PorringerModel):
     package: str | None = None
     kind: str | None = None
     action_id: str | None = None
+    entry_id: str | None = None
     success: bool
     skipped: bool = False
     skip_reason: str | None = None

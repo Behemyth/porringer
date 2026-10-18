@@ -17,7 +17,7 @@ import logging
 import re
 import shutil
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import cast
 
@@ -30,7 +30,11 @@ from packaging.version import InvalidVersion, Version
 from porringer.core.plugin_schema.environment import CheckUpdatesParameters, Environment
 from porringer.core.plugin_schema.project_environment import ProjectInstaller
 from porringer.core.plugin_schema.python_environment import PythonEnvironment
-from porringer.core.plugin_schema.runtime import RuntimeContext
+from porringer.core.plugin_schema.runtime import (
+    RuntimeContext,
+    RuntimeProvider,
+    runtime_tag_matches,
+)
 from porringer.core.schema import Package, PackageRef, PluginKind
 from porringer.schema import (
     Install,
@@ -168,8 +172,8 @@ class PackageCache:
     ) -> list[Package]:
         """Return cached ``packages()`` result, querying on first access.
 
-        The cache key is ``(installer, project_path)`` so that
-        project-scoped queries are cached separately from global ones.
+        The cache key is ``(installer, project_path, runtime executables)``
+        so project-scoped and runtime-tagged queries are cached separately.
 
         Args:
             installer: The installer/plugin name.
@@ -180,7 +184,8 @@ class PackageCache:
         Returns:
             The list of installed packages.
         """
-        key = f'pkg:{installer}:{project_path}'
+        runtimes = sorted(runtime_context.executables.items()) if runtime_context else []
+        key = f'pkg:{installer}:{project_path}:{runtimes}'
         async with self._lock_for(key):
             if key in self._packages:
                 self._package_hits += 1
@@ -194,14 +199,16 @@ class PackageCache:
         """Remove cached packages for an installer so next access re-queries.
 
         Call this after a successful install/upgrade so subsequent
-        presence checks see fresh state.
+        presence checks see fresh state.  Entries for every runtime are
+        dropped.
 
         Args:
             installer: The installer/plugin name.
             project_path: Optional project directory scope.
         """
-        key = f'pkg:{installer}:{project_path}'
-        if self._packages.pop(key, None) is not None:
+        prefix = f'pkg:{installer}:{project_path}:'
+        for key in [key for key in self._packages if key.startswith(prefix)]:
+            del self._packages[key]
             self._package_invalidations += 1
 
     def invalidate_all(self) -> None:
@@ -238,6 +245,51 @@ class ResolutionContext:
     """Resolved runtime paths.  Threaded through to ``packages()``
     so Python-ecosystem plugins can query packages from the correct
     interpreter."""
+
+
+async def resolve_runtime_tag_override(
+    tag: str,
+    ecosystem: str | None,
+    environments: dict[str, Environment],
+) -> RuntimeContext | None:
+    """Build a one-off :class:`RuntimeContext` for a specific *tag*.
+
+    Scans *environments* for a :class:`RuntimeProvider` whose
+    ``provided_runtime_kind()`` matches *ecosystem*, then resolves
+    *tag* to a concrete executable path.
+
+    Returns ``None`` when no matching provider exists or when the tag
+    cannot be resolved to an executable.
+    """
+    if ecosystem is None:
+        return None
+
+    for env in environments.values():
+        if isinstance(env, RuntimeProvider) and env.provided_runtime_kind() == ecosystem:
+            executable = await env.resolve_executable(tag)
+            if executable is not None:
+                return RuntimeContext(executables={ecosystem: executable})
+            return None
+
+    return None
+
+
+async def apply_runtime_tag(
+    action: SetupAction,
+    environments: dict[str, Environment],
+    ctx: ResolutionContext,
+) -> ResolutionContext | SetupActionResult:
+    """Apply *action*'s runtime-tag override, or return a failure result."""
+    if action.runtime_tag is None:
+        return ctx
+    override_ctx = await resolve_runtime_tag_override(action.runtime_tag, action.ecosystem, environments)
+    if override_ctx is None:
+        return SetupActionResult(
+            action=action,
+            success=False,
+            message=f"Could not resolve runtime tag '{action.runtime_tag}' for ecosystem '{action.ecosystem}'",
+        )
+    return replace(ctx, runtime_context=override_ctx)
 
 
 async def _query_installed_packages(installer: str, environment: Environment, ctx: ResolutionContext) -> list[Package]:
@@ -284,6 +336,51 @@ async def resolve_operation(
         )
 
     return await _resolve_package_operation(action, environments, strategy, ctx)
+
+
+async def resolve_uninstall_operation(
+    action: SetupAction,
+    environment: Environment,
+    context: ResolutionContext | None = None,
+) -> ResolvedOperation:
+    """Resolve whether *action*'s package is installed and can be removed.
+
+    Presence is matched by name only; the manifest's version constraint
+    does not decide whether a package gets removed.
+
+    Returns:
+        :class:`Uninstall` when present, otherwise :class:`Skip` with
+        ``NOT_INSTALLED``.
+    """
+    assert action.installer is not None
+    assert action.package is not None
+    ctx = context or ResolutionContext()
+
+    installed_packages = await _query_installed_packages(action.installer, environment, ctx)
+    present, _detail, matched = is_package_installed(
+        PackageRef(name=action.package.name),
+        installed_packages,
+        type(environment).package_name_validator(),
+        action.kind,
+    )
+    if not present:
+        if action.kind is PluginKind.RUNTIME and isinstance(environment, RuntimeProvider):
+            tags = await environment.available_tags()
+            if any(runtime_tag_matches(tag, action.package.name) for tag in tags):
+                return ResolvedOperation(
+                    action=action,
+                    operation=Skip(reason=SkipReason.NOT_MANAGED),
+                    message=f"'{action.package.name}' was installed by something other than {action.installer}",
+                )
+        return ResolvedOperation(
+            action=action,
+            operation=Skip(reason=SkipReason.NOT_INSTALLED),
+            message=f"'{action.package.name}' is not installed",
+        )
+    return ResolvedOperation(
+        action=action,
+        operation=Uninstall(installed_version=matched.version if matched is not None else None),
+    )
 
 
 async def _resolve_package_operation(

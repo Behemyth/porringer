@@ -27,7 +27,11 @@ from pathlib import Path
 import aiohttp
 from packaging.version import InvalidVersion, Version
 
-from porringer.core.plugin_schema.environment import CheckUpdatesParameters, Environment
+from porringer.core.plugin_schema.environment import (
+    CheckUpdatesParameters,
+    Environment,
+    PackageScope,
+)
 from porringer.core.plugin_schema.runtime import RuntimeConsumer, RuntimeContext
 from porringer.core.schema import Ecosystem, Package, PackageRef
 from porringer.utility import HTTP_TIMEOUT
@@ -111,6 +115,11 @@ class PythonEnvironment(Environment, RuntimeConsumer):
     def consumed_runtime_kind(cls) -> str:
         """Python environment plugins consume a Python runtime."""
         return 'python'
+
+    @classmethod
+    def package_scope(cls) -> PackageScope:
+        """Packages live in the interpreter the plugin runs against."""
+        return PackageScope.RUNTIME
 
     @classmethod
     def standalone_binary(cls) -> bool:
@@ -294,7 +303,9 @@ class PythonEnvironment(Environment, RuntimeConsumer):
             else aiohttp.ClientSession(timeout=HTTP_TIMEOUT)
         ) as session:
 
-            def _make_check(pkg_ref: PackageRef) -> Callable[[], Awaitable[Package | None]]:
+            def _make_check(
+                pkg_ref: PackageRef,
+            ) -> Callable[[], Awaitable[Package | None]]:
                 return lambda: self._check_single_pypi_package(session, pkg_ref, params.include_prereleases, logger)
 
             gathered = await gather_bounded(

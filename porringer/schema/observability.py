@@ -12,7 +12,7 @@ from pydantic import Field, model_validator
 
 from porringer.core.schema import PorringerModel
 
-SCHEMA_VERSION = '1'
+SCHEMA_VERSION = '2'
 
 
 def action_id_for(manifest_index: int, action_index: int) -> str:

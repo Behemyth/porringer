@@ -61,7 +61,7 @@ class TestBootstrapDeferredRuntime:
         assert len(runtime_actions) == 1
         assert runtime_actions[0].installer is None, 'Expected deferred (installer=None)'
         assert runtime_actions[0].package is not None
-        assert runtime_actions[0].package.name == '3.14'
+        assert runtime_actions[0].package.name == '3.15'
 
 
 class TestBootstrapDeferredPackage:

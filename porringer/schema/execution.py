@@ -13,7 +13,13 @@ from pydantic import Field
 
 from porringer.core.schema import Ecosystem, PackageRef, PluginKind, PorringerModel
 from porringer.schema.manifest import ManifestMetadata
-from porringer.schema.observability import SCHEMA_VERSION, Diagnostic, FollowUpAction, ResultStatus
+from porringer.schema.observability import (
+    SCHEMA_VERSION,
+    ActionRef,
+    Diagnostic,
+    FollowUpAction,
+    ResultStatus,
+)
 
 # ---------------------------------------------------------------------------
 # Operation union — discriminated by type
@@ -149,6 +155,8 @@ class SkipReason(Enum):
     UPDATE_AVAILABLE = auto()
     ALREADY_LATEST = auto()
     GUARD_SATISFIED = auto()
+    NOT_MANAGED = auto()
+    """Present, but installed by something else, so this installer can't remove it."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -172,6 +180,9 @@ class SetupAction:
         package: The package reference (for PACKAGE/TOOL/RUNTIME/SCM).
         package_description: Optional per-package description from the manifest.
         include_prereleases: Per-package opt-in for pre-release update detection.
+        runtime_tag: Runtime the installer runs under, from the entry's ``runtime``.
+        entry_id: Stable identity of the manifest entry this action came from;
+            ``None`` for actions Porringer synthesized.
     """
 
     description: str
@@ -182,6 +193,7 @@ class SetupAction:
     package_description: str | None = None
     include_prereleases: bool = False
     runtime_tag: str | None = None
+    entry_id: str | None = None
 
 
 @dataclass(slots=True)
@@ -203,6 +215,7 @@ class SetupActionResult:
         cli_steps: Ordered command steps planned for the action, when it has
             more than one command.
         failed_step_index: One-based command step that failed, when known.
+        ref: Stable action reference, attached by ``sync.run``.
     """
 
     action: SetupAction
@@ -216,6 +229,7 @@ class SetupActionResult:
     duration_seconds: float | None = None
     cli_steps: tuple[tuple[str, ...], ...] | None = None
     failed_step_index: int | None = None
+    ref: ActionRef | None = None
 
 
 class SyncStrategy(Enum):
@@ -289,7 +303,7 @@ class SetupParameters(PorringerModel):
             'Set of package names to include.  When set, only actions '
             'whose ``action.package.name`` appears in this set '
             '(case-insensitive) are executed.  ``None`` means all '
-            'packages.  Non-package actions '
+            'packages; an empty set matches no package actions.  Non-package actions '
             'are always included regardless of this filter.'
         ),
     )
@@ -297,11 +311,20 @@ class SetupParameters(PorringerModel):
         default=None,
         description=(
             'Stable action ids to include (for example ``0:2``). '
+            '``None`` means all actions; an empty set matches none. '
             'Ids are matched against the resolved input path index and original '
             'manifest action order, after path resolution but before other '
             'filters can renumber actions. Failed paths keep their resolved '
             'input slot, so later manifest ids stay stable when '
             '``fail_fast=False``.'
+        ),
+    )
+    entry_ids: set[str] | None = Field(
+        default=None,
+        description=(
+            'Manifest entry ids to include (``entry_id`` on actions and results). '
+            'Unlike action ids they survive edits and reordering of the manifest. '
+            '``None`` means all actions; an empty set matches none.'
         ),
     )
     max_concurrency: int = Field(
@@ -313,11 +336,19 @@ class SetupParameters(PorringerModel):
             'TaskGroup-dispatched coroutine.'
         ),
     )
-    plugins: set[str] | None = Field(
+    plugin_names: set[str] | None = Field(
         default=None,
         description=(
-            'Set of plugin names to include.  ``None`` means all plugins.'
-            '  Only actions handled by named plugins will be executed.'
+            'Plugin names to include.  ``None`` means all plugins; an empty '
+            'set matches no plugin-handled actions.  Actions without an '
+            'installer are always included.'
+        ),
+    )
+    action_kinds: set[PluginKind] | None = Field(
+        default=None,
+        description=(
+            'Action kinds to include.  ``None`` means all kinds; an empty set '
+            'matches no actions.  Actions without a kind are excluded when set.'
         ),
     )
 

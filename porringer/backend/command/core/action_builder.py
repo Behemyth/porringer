@@ -21,11 +21,14 @@ from porringer.core.plugin_schema.project_environment import ProjectInstaller
 from porringer.core.schema import Ecosystem, PackageRef, PluginKind
 from porringer.schema import (
     ManifestMetadata,
+    PackageSpec,
     SetupAction,
     SetupManifest,
     SetupResults,
     SyncStrategy,
+    entry_id,
 )
+from porringer.utility.exception import ManifestError, ManifestValidationCode
 
 from ..manifest import find_manifest
 from .discovery import DiscoveredPlugins, discover_all_plugins
@@ -33,7 +36,13 @@ from .discovery import DiscoveredPlugins, discover_all_plugins
 logger = logging.getLogger(__name__)
 
 # Known forges whose URLs are recognised for default-scm-from-url inference.
-_CLONABLE_FORGES = {'github.com', 'gitlab.com', 'bitbucket.org', 'codeberg.org', 'sr.ht'}
+_CLONABLE_FORGES = {
+    'github.com',
+    'gitlab.com',
+    'bitbucket.org',
+    'codeberg.org',
+    'sr.ht',
+}
 
 # A clonable repo URL path has exactly `owner/repo` segments.
 _OWNER_REPO_SEGMENTS = 2
@@ -244,10 +253,11 @@ def _emit_section_actions(
     actions: list[SetupAction],
     kind: PluginKind,
     ecosystem: Ecosystem,
-    packages: list,
+    packages: list[PackageSpec],
     installer: str | None,
     verb: str,
     is_registered: bool,
+    manifest_path: Path | None = None,
 ) -> None:
     """Append actions for a single manifest section to *actions*.
 
@@ -264,39 +274,50 @@ def _emit_section_actions(
         )
         return
 
-    if kind == PluginKind.SCM:
-        for package in packages:
-            if not package.is_applicable():
-                continue
-            scm_description = package.description or str(package.name)
-            desc = action_description(kind, verb, installer, package=package.name, registered=is_registered)
-            actions.append(
-                SetupAction(
-                    description=desc,
-                    kind=kind,
-                    ecosystem=ecosystem,
-                    installer=installer,
-                    package=package.name,
-                    package_description=scm_description,
-                )
-            )
-        return
-
     for package in packages:
         if not package.is_applicable():
             continue
-        desc = action_description(kind, verb, installer, package=package.name, registered=is_registered)
+        entry_installer = package.installer or installer
+        desc = action_description(
+            kind,
+            verb,
+            entry_installer,
+            package=package.name,
+            registered=is_registered or bool(package.installer),
+        )
         actions.append(
             SetupAction(
                 description=desc,
                 kind=kind,
                 ecosystem=ecosystem,
-                installer=installer,
+                installer=entry_installer,
                 package=package.name,
-                package_description=package.description,
-                include_prereleases=package.include_prereleases,
+                package_description=(package.description or str(package.name))
+                if kind == PluginKind.SCM
+                else package.description,
+                include_prereleases=kind != PluginKind.SCM and package.include_prereleases,
+                runtime_tag=package.runtime if kind != PluginKind.SCM else None,
+                entry_id=entry_id(manifest_path, kind, ecosystem, package),
             )
         )
+
+
+def _check_entry_installers(
+    kind: PluginKind,
+    ecosystem: Ecosystem,
+    packages: list[PackageSpec],
+    resolver: BackendResolver,
+) -> None:
+    """Reject entries naming an installer that isn't a registered plugin for their kind and ecosystem."""
+    registered = resolver.registered_names(kind, ecosystem)
+    for index, package in enumerate(packages):
+        if package.installer is not None and package.installer not in registered:
+            choices = ', '.join(sorted(registered)) or 'none registered'
+            raise ManifestError(
+                f"{kind.value}.{ecosystem}[{index}]: installer '{package.installer}' does not install "
+                f"{kind.value} for '{ecosystem}' (choices: {choices})",
+                code=ManifestValidationCode.UNKNOWN_PLUGIN,
+            )
 
 
 def _select_project_candidate(
@@ -518,16 +539,19 @@ def _build_bootstrap_actions(
     }
 
     for action in actions:
-        if (
-            action.installer is not None
-            or action.kind not in {PluginKind.TOOL, PluginKind.RUNTIME}
-            or action.ecosystem is None
-        ):
+        if action.kind not in {PluginKind.TOOL, PluginKind.RUNTIME} or action.ecosystem is None:
             continue
 
         ecosystem = action.ecosystem
-        candidates = resolver.registered_names(action.kind, ecosystem)
         preferred = preferences.get(ecosystem)
+        if action.installer is None:
+            candidates = resolver.registered_names(action.kind, ecosystem)
+        elif resolver.is_available(action.installer):
+            continue
+        else:
+            # An entry pinned to an installer that isn't available yet bootstraps that installer only.
+            candidates = [action.installer]
+            preferred = None
 
         for name in candidates:
             plugin = environments.get(name)
@@ -563,7 +587,11 @@ def _build_bootstrap_actions(
                 continue
 
             desc = action_description(
-                requirement.kind, verb, boot_installer, package=requirement.package, registered=is_registered
+                requirement.kind,
+                verb,
+                boot_installer,
+                package=requirement.package,
+                registered=is_registered,
             )
             synthesized.append(
                 SetupAction(
@@ -810,6 +838,7 @@ def _compute_needed_pairs(
     plugins: DiscoveredPlugins,
     *,
     search_from: Path,
+    infer: bool = True,
 ) -> set[tuple[PluginKind, Ecosystem]]:
     """Return the (kind, ecosystem) pairs the resolver needs to resolve.
 
@@ -821,7 +850,7 @@ def _compute_needed_pairs(
     needed_pairs: set[tuple[PluginKind, Ecosystem]] = set()
     for kind, ecosystem, _packages in manifest.iter_sections():
         needed_pairs.add((kind, ecosystem))
-    for plugin in (plugins.project_environments or {}).values():
+    for plugin in (plugins.project_environments or {}).values() if infer else ():
         if plugin.project_relevance(search_from):
             eco = plugin.ecosystem()
             needed_pairs.add((PluginKind.PROJECT, eco))
@@ -836,6 +865,8 @@ def _compute_needed_pairs(
         eco = type(plugin).ecosystem()
         if eco is not None:
             needed_pairs.add((requirement.kind, eco))
+    if not infer:
+        return needed_pairs
     # Eagerly resolve (SCM, git) when the manifest has no explicit scm
     # section but its url looks like a clonable repo, so
     # `_build_scm_from_url_action` can query real availability.
@@ -855,6 +886,8 @@ def build_actions(
     strategy: SyncStrategy = SyncStrategy.MINIMAL,
     *,
     search_from: Path | None = None,
+    infer: bool = True,
+    manifest_path: Path | None = None,
 ) -> list[SetupAction]:
     """Builds the list of actions from a manifest.
 
@@ -873,6 +906,10 @@ def build_actions(
         strategy: The sync strategy (used for description text).
         search_from: The directory from which project-relevance discovery
             should start.
+        infer: When ``False`` only declared entries (and their installer
+            prerequisites) become actions; nothing is inferred from the
+            surrounding project.  Used for the global manifest.
+        manifest_path: The manifest file, used for each action's ``entry_id``.
 
     Returns:
         List of actions to perform.
@@ -886,7 +923,7 @@ def build_actions(
     if search_from is None:
         search_from = Path('.')
 
-    needed_pairs = _compute_needed_pairs(manifest, plugins, search_from=search_from)
+    needed_pairs = _compute_needed_pairs(manifest, plugins, search_from=search_from, infer=infer)
     resolver = BackendResolver(plugins.all_plugins, manifest.preferences, needed_pairs=needed_pairs)
 
     verb = STRATEGY_VERB[strategy]
@@ -896,21 +933,35 @@ def build_actions(
         if kind == PluginKind.PROJECT:
             continue
 
+        _check_entry_installers(kind, ecosystem, packages, resolver)
         installer = resolver.resolve(kind, ecosystem)
 
-        if installer is None:
+        if installer is None and any(package.installer is None for package in packages):
             _log_unresolved(resolver, kind, ecosystem)
 
         is_registered = installer is not None or resolver.is_registered(kind, ecosystem)
-        _emit_section_actions(actions, kind, ecosystem, packages, installer, verb, is_registered)
+        _emit_section_actions(
+            actions,
+            kind,
+            ecosystem,
+            packages,
+            installer,
+            verb,
+            is_registered,
+            manifest_path,
+        )
 
-    implicit_project_actions = _build_implicit_project_actions(
-        plugins,
-        resolver,
-        dict(manifest.preferences),
-        search_from=search_from,
-        existing_actions=actions,
-        verb=verb,
+    implicit_project_actions = (
+        _build_implicit_project_actions(
+            plugins,
+            resolver,
+            dict(manifest.preferences),
+            search_from=search_from,
+            existing_actions=actions,
+            verb=verb,
+        )
+        if infer
+        else []
     )
     if implicit_project_actions:
         actions.extend(implicit_project_actions)
@@ -919,11 +970,13 @@ def build_actions(
     if bootstrap_actions:
         actions.extend(bootstrap_actions)
 
-    scm_from_url_action = _build_scm_from_url_action(manifest, resolver, verb)
+    scm_from_url_action = _build_scm_from_url_action(manifest, resolver, verb) if infer else None
     if scm_from_url_action is not None:
         actions.append(scm_from_url_action)
 
-    implicit_runtime_action = _build_implicit_runtime_action(manifest, resolver, verb, search_from=search_from)
+    implicit_runtime_action = (
+        _build_implicit_runtime_action(manifest, resolver, verb, search_from=search_from) if infer else None
+    )
     if implicit_runtime_action is not None:
         actions.append(implicit_runtime_action)
 
@@ -949,6 +1002,7 @@ def _build_preview(
     use_cache: bool,
     log_label: str,
     plugins: DiscoveredPlugins | None = None,
+    infer: bool = True,
 ) -> SetupResults:
     """Shared implementation for :func:`parse_manifest` and :func:`load_manifest`.
 
@@ -964,6 +1018,7 @@ def _build_preview(
         log_label: Human-readable label for the log message.
         plugins: Pre-discovered plugins.  When provided, plugin
             discovery is skipped entirely.
+        infer: Whether to infer actions from the surrounding project.
 
     Returns:
         SetupResults containing the action plan.
@@ -980,6 +1035,8 @@ def _build_preview(
         resolved_plugins,
         strategy,
         search_from=result.root_directory,
+        infer=infer,
+        manifest_path=result.manifest_path,
     )
     metadata = ManifestMetadata(
         name=result.manifest.name,
@@ -1031,6 +1088,7 @@ def load_manifest(
     strategy: SyncStrategy = SyncStrategy.MINIMAL,
     *,
     plugins: DiscoveredPlugins | None = None,
+    infer: bool = True,
 ) -> SetupResults:
     """Load a manifest using cached plugin knowledge.
 
@@ -1050,6 +1108,7 @@ def load_manifest(
         strategy: The sync strategy.
         plugins: Pre-discovered plugins. ``None`` uses cached
             discovery internally.
+        infer: Whether to infer actions from the surrounding project.
 
     Returns:
         SetupResults containing the action plan.  Actions with
@@ -1058,4 +1117,11 @@ def load_manifest(
     Raises:
         ManifestError: If the manifest cannot be found or parsed.
     """
-    return _build_preview(path, strategy, use_cache=True, log_label='Loading manifest (fast)', plugins=plugins)
+    return _build_preview(
+        path,
+        strategy,
+        use_cache=True,
+        log_label='Loading manifest (fast)',
+        plugins=plugins,
+        infer=infer,
+    )

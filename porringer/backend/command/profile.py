@@ -76,6 +76,7 @@ class ProfileCommands:
         """
         tmp_dir = Path(tempfile.mkdtemp(prefix='porringer_profile_manifests_'))
         paths: list[Path] = []
+        completed = False
         try:
             for index, manifest in enumerate(profile.manifests):
                 destination = tmp_dir / f'manifest_{index}.json'
@@ -90,9 +91,11 @@ class ProfileCommands:
                 if not result.success:
                     raise ValueError(f'Failed to download manifest from {manifest.url}: {result.message}')
                 paths.append(destination)
-        except Exception:
-            shutil.rmtree(tmp_dir, ignore_errors=True)
-            raise
+            completed = True
+        finally:
+            # Also covers cancellation, which is not an ``Exception``.
+            if not completed:
+                shutil.rmtree(tmp_dir, ignore_errors=True)
         return tmp_dir, paths
 
     async def inspect(

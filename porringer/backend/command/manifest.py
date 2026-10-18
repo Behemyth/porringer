@@ -36,10 +36,18 @@ from porringer.schema import (
     ManifestValidationResult,
     SetupManifest,
 )
-from porringer.schema.manifest import MANIFEST_SCHEMA_DIALECT, MANIFEST_SCHEMA_URL, ManifestResult
+from porringer.schema.manifest import (
+    MANIFEST_SCHEMA_DIALECT,
+    MANIFEST_SCHEMA_URL,
+    ManifestResult,
+)
 from porringer.utility.exception import ManifestError, ManifestValidationCode
 
-from .core.discovery import discover_all_plugins, register_invalidation_hook, scan_environment_group
+from .core.discovery import (
+    discover_all_plugins,
+    register_invalidation_hook,
+    scan_environment_group,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -566,7 +574,16 @@ def _validate_backends(
     # Kinds whose backends may be deferred to a later phase.
     _DEFERRABLE_KINDS = {PluginKind.TOOL, PluginKind.RUNTIME}
 
-    for kind, ecosystem, _packages in manifest.iter_sections():
+    for kind, ecosystem, packages in manifest.iter_sections():
+        registered = resolver.registered_names(kind, ecosystem)
+        for index, spec in enumerate(packages):
+            if spec.installer is not None and spec.installer not in registered:
+                error_callback(
+                    f'{kind.value}.{ecosystem}[{index}].installer',
+                    f"Installer '{spec.installer}' does not install {kind.value} for '{ecosystem}' "
+                    f'(choices: {", ".join(sorted(registered)) or "none registered"})',
+                    ManifestValidationCode.UNKNOWN_PLUGIN,
+                )
         installer = resolver.resolve(kind, ecosystem)
         if installer is None:
             if kind in _DEFERRABLE_KINDS and warning_callback is not None:

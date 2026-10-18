@@ -53,6 +53,7 @@ class ActionSnapshot(PorringerModel):
     package_description: str | None = None
     include_prereleases: bool = False
     runtime_tag: str | None = None
+    entry_id: str | None = None
 
 
 class ActionInspection(PorringerModel):

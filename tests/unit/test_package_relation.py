@@ -13,6 +13,7 @@ from packaging.version import Version
 
 from porringer.backend.command.core.resolution import PackageCache, is_package_installed
 from porringer.core.plugin_schema.environment import Environment
+from porringer.core.plugin_schema.runtime import RuntimeContext
 from porringer.core.schema import (
     Distribution,
     Package,
@@ -264,6 +265,35 @@ class TestPackageCache:
         await cache.get_packages('pip', env)
 
         assert env.packages.await_count == _EXPECTED_TWO_CALLS
+
+    @staticmethod
+    async def test_runtimes_cached_separately_and_invalidated_together() -> None:
+        """Different interpreters get separate entries; invalidation drops all of them."""
+        env = make_environment(installed=[Package(name='ruff', version='0.8.0')])
+        py312 = RuntimeContext(executables={'python': Path('py312')})
+        py313 = RuntimeContext(executables={'python': Path('py313')})
+        cache = PackageCache()
+
+        await cache.get_packages('pip', env, runtime_context=py312)
+        await cache.get_packages('pip', env, runtime_context=py313)
+        assert env.packages.await_count == _EXPECTED_TWO_CALLS
+
+        cache.invalidate_packages('pip')
+        await cache.get_packages('pip', env, runtime_context=py312)
+
+        assert cache.stats().package_invalidations == _EXPECTED_TWO_CALLS
+        assert env.packages.await_count == _EXPECTED_TWO_CALLS + 1
+
+    @staticmethod
+    async def test_invalidation_does_not_match_installer_prefix() -> None:
+        """Invalidating 'pip' leaves 'pipx' cached."""
+        env = make_environment()
+        cache = PackageCache()
+
+        await cache.get_packages('pipx', env)
+        cache.invalidate_packages('pip')
+
+        assert cache.stats().package_invalidations == 0
 
     @staticmethod
     async def test_concurrent_access_serializes() -> None:
