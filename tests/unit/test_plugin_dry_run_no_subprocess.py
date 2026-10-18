@@ -103,6 +103,7 @@ async def test_log_only_dry_run_preserves_result_without_execution(
             'example',
             '--accept-source-agreements',
             '--accept-package-agreements',
+            '--disable-interactivity',
             '-e',
             '--version',
             '1.2.3',

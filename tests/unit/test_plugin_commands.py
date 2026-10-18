@@ -22,7 +22,10 @@ from unittest.mock import patch
 import pytest
 
 from porringer.backend.command.core.action_builder import get_cli_steps
-from porringer.backend.command.core.discovery import DiscoveredPlugins, discover_all_plugins
+from porringer.backend.command.core.discovery import (
+    DiscoveredPlugins,
+    discover_all_plugins,
+)
 from porringer.core.plugin_schema.environment import Environment, PackageParameters
 from porringer.core.schema import Ecosystem, Package, PackageRef, PluginKind
 from porringer.plugin.apt.plugin import APTEnvironment
@@ -133,6 +136,7 @@ async def test_system_package_command_contract(
             'example',
             '--accept-source-agreements',
             '--accept-package-agreements',
+            '--disable-interactivity',
             '-e',
         ]
         if constraint:

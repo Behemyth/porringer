@@ -44,7 +44,10 @@ class TestResolveExecutable:
         """Successful resolution returns the executable path."""
         exe_path = r'C:\Users\user\AppData\Local\Programs\Python\Python314\python.exe'
         with (
-            patch('asyncio.create_subprocess_exec', return_value=_fake_proc(stdout=f'{exe_path}\n')),
+            patch(
+                'asyncio.create_subprocess_exec',
+                return_value=_fake_proc(stdout=f'{exe_path}\n'),
+            ),
             patch.object(Path, 'exists', return_value=True),
         ):
             result = await environment.resolve_executable('3.14')
@@ -53,7 +56,10 @@ class TestResolveExecutable:
     @staticmethod
     async def test_resolve_not_installed(environment: PIMEnvironment) -> None:
         """Returns None when version is not installed."""
-        with patch('asyncio.create_subprocess_exec', return_value=_fake_proc(returncode=1, stderr='not found')):
+        with patch(
+            'asyncio.create_subprocess_exec',
+            return_value=_fake_proc(returncode=1, stderr='not found'),
+        ):
             result = await environment.resolve_executable('3.99')
             assert result is None
 
@@ -68,7 +74,10 @@ class TestResolveExecutable:
     async def test_resolve_path_does_not_exist(environment: PIMEnvironment) -> None:
         """Returns None when resolved path does not exist."""
         with (
-            patch('asyncio.create_subprocess_exec', return_value=_fake_proc(stdout='/bad/path/python\n')),
+            patch(
+                'asyncio.create_subprocess_exec',
+                return_value=_fake_proc(stdout='/bad/path/python\n'),
+            ),
             patch.object(Path, 'exists', return_value=False),
         ):
             result = await environment.resolve_executable('3.14')
@@ -79,7 +88,9 @@ class TestDefaultExecutable:
     """Tests for default_executable."""
 
     @staticmethod
-    async def test_default_executable_success_is_cached(environment: PIMEnvironment) -> None:
+    async def test_default_executable_success_is_cached(
+        environment: PIMEnvironment,
+    ) -> None:
         """Successful default executable resolution is cached for the process."""
         exe_path = r'C:\Users\user\AppData\Local\Programs\Python\Python314\python.exe'
         stdout = f'3.14\n{exe_path}\n'
@@ -96,7 +107,9 @@ class TestDefaultExecutable:
         mock_exec.assert_called_once()
 
     @staticmethod
-    async def test_default_executable_invalidation_reprobes(environment: PIMEnvironment) -> None:
+    async def test_default_executable_invalidation_reprobes(
+        environment: PIMEnvironment,
+    ) -> None:
         """Invalidating the runtime cache causes the next lookup to run py again."""
         exe_path = r'C:\Users\user\AppData\Local\Programs\Python\Python314\python.exe'
         stdout = f'3.14\n{exe_path}\n'
@@ -112,7 +125,9 @@ class TestDefaultExecutable:
         assert mock_exec.call_count == EXPECTED_PROBES_AFTER_INVALIDATION
 
     @staticmethod
-    async def test_default_executable_unexpected_output(environment: PIMEnvironment) -> None:
+    async def test_default_executable_unexpected_output(
+        environment: PIMEnvironment,
+    ) -> None:
         """Malformed py output returns None instead of caching a bad path."""
         with patch('asyncio.create_subprocess_exec', return_value=_fake_proc(stdout='3.14\n')):
             assert await environment.default_executable() is None
@@ -178,7 +193,10 @@ class TestSetup:
         monkeypatch.setenv('LOCALAPPDATA', r'C:\\Users\\u\\AppData\\Local')
         with (
             patch.object(Path, 'exists', return_value=False),
-            patch('asyncio.create_subprocess_exec', return_value=_fake_proc(returncode=1, stderr='boom')),
+            patch(
+                'asyncio.create_subprocess_exec',
+                return_value=_fake_proc(returncode=1, stderr='boom'),
+            ),
         ):
             await environment.setup()
 
@@ -187,10 +205,10 @@ class TestUninstallCommand:
     """Tests for the ``uninstall_command`` flag additions."""
 
     @staticmethod
-    def test_uninstall_includes_purge(environment: PIMEnvironment) -> None:
-        """Uninstall command includes --purge for full reversal."""
+    def test_uninstall_targets_only_the_tag(environment: PIMEnvironment) -> None:
+        """Uninstall removes just the tagged runtime; ``--purge`` would reject the tag or remove them all."""
         cmd = environment.uninstall_command(PackageRef(name='3.14'))
-        assert cmd == ['py', 'uninstall', '--purge', '-y', '3.14']
+        assert cmd == ['py', 'uninstall', '-y', '3.14']
 
 
 class TestPIMEnvironmentUnit(RuntimeProviderUnitTests[PIMEnvironment]):

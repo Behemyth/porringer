@@ -16,7 +16,13 @@ from packaging.version import InvalidVersion, Version
 
 from porringer.core.plugin_schema.environment import CheckUpdatesParameters, Environment
 from porringer.core.plugin_schema.runtime import RuntimeContext, RuntimeProvider
-from porringer.core.schema import Ecosystem, Package, PackageRef, PluginDependency, PluginKind
+from porringer.core.schema import (
+    Ecosystem,
+    Package,
+    PackageRef,
+    PluginDependency,
+    PluginKind,
+)
 
 # Architecture suffix pattern: a trailing dash followed by digits (e.g. "-64", "-32").
 _ARCH_SUFFIX = re.compile(r'-\d+$')
@@ -81,7 +87,11 @@ async def _configure_pim_shortcuts() -> None:
         return
 
     if returncode != 0:
-        configure_logger.warning('py install --configure --yes failed (rc=%s): %s', returncode, stderr.strip())
+        configure_logger.warning(
+            'py install --configure --yes failed (rc=%s): %s',
+            returncode,
+            stderr.strip(),
+        )
         return
     stdout = stdout.strip()
     if stdout:
@@ -229,7 +239,10 @@ class PIMEnvironment(Environment, RuntimeProvider):
         logger = logging.getLogger('porringer.pim.default_tag')
         try:
             returncode, stdout, stderr = await _run_py(
-                ['-c', 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")'],
+                [
+                    '-c',
+                    'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")',
+                ],
                 timeout_seconds=30,
             )
         except FileNotFoundError:
@@ -295,26 +308,34 @@ class PIMEnvironment(Environment, RuntimeProvider):
 
     @override
     def install_command(
-        self, package: PackageRef, *, include_prereleases: bool = False, runtime_context: RuntimeContext | None = None
+        self,
+        package: PackageRef,
+        *,
+        include_prereleases: bool = False,
+        runtime_context: RuntimeContext | None = None,
     ) -> list[str]:
         """Returns the CLI command to install a Python runtime via pymanager."""
         return ['py', 'install', package.name]
 
     @override
     def upgrade_command(
-        self, package: PackageRef, *, include_prereleases: bool = False, runtime_context: RuntimeContext | None = None
+        self,
+        package: PackageRef,
+        *,
+        include_prereleases: bool = False,
+        runtime_context: RuntimeContext | None = None,
     ) -> list[str]:
         """Returns the CLI command to upgrade a Python runtime via pymanager."""
         return ['py', 'install', '--update', package.name]
 
     @override
     def uninstall_command(self, package: PackageRef, *, runtime_context: RuntimeContext | None = None) -> list[str]:
-        """Returns the CLI command to uninstall a Python runtime via pymanager.
+        """Returns the CLI command to uninstall one Python runtime via pymanager.
 
-        Uses ``--purge`` to remove the runtime's data directory in
-        addition to unregistering it, and ``-y`` to skip confirmation.
+        ``-y`` skips confirmation. Never ``--purge``: pymanager rejects it
+        with a tag, and without one it removes every runtime.
         """
-        return ['py', 'uninstall', '--purge', '-y', package.name]
+        return ['py', 'uninstall', '-y', package.name]
 
     @override
     def sort_tags(self, tags: list[str]) -> list[str]:
@@ -397,7 +418,10 @@ class PIMEnvironment(Environment, RuntimeProvider):
 
     @override
     async def packages(
-        self, *, project_path: Path | None = None, runtime_context: RuntimeContext | None = None
+        self,
+        *,
+        project_path: Path | None = None,
+        runtime_context: RuntimeContext | None = None,
     ) -> list[Package]:
         """Lists all installed Python runtimes.
 

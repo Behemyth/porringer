@@ -46,22 +46,40 @@ class WingetEnvironment(Environment):
 
     @override
     def install_command(
-        self, package: PackageRef, *, include_prereleases: bool = False, runtime_context: RuntimeContext | None = None
+        self,
+        package: PackageRef,
+        *,
+        include_prereleases: bool = False,
+        runtime_context: RuntimeContext | None = None,
     ) -> list[str]:
         """Returns the CLI command to install a package via winget."""
         cmd = ['winget', 'install', '--id', package.name]
-        cmd.extend(['--accept-source-agreements', '--accept-package-agreements', '-e'])
+        cmd.extend([
+            '--accept-source-agreements',
+            '--accept-package-agreements',
+            '--disable-interactivity',
+            '-e',
+        ])
         if package.constraint:
             cmd.extend(['--version', package.constraint])
         return cmd
 
     @override
     def upgrade_command(
-        self, package: PackageRef, *, include_prereleases: bool = False, runtime_context: RuntimeContext | None = None
+        self,
+        package: PackageRef,
+        *,
+        include_prereleases: bool = False,
+        runtime_context: RuntimeContext | None = None,
     ) -> list[str]:
         """Returns the CLI command to upgrade a package via winget."""
         cmd = ['winget', 'upgrade', '--id', package.name]
-        cmd.extend(['--accept-source-agreements', '--accept-package-agreements', '-e'])
+        cmd.extend([
+            '--accept-source-agreements',
+            '--accept-package-agreements',
+            '--disable-interactivity',
+            '-e',
+        ])
         if package.constraint:
             cmd.extend(['--version', package.constraint])
         return cmd
@@ -77,7 +95,14 @@ class WingetEnvironment(Environment):
     @override
     def uninstall_command(self, package: PackageRef, *, runtime_context: RuntimeContext | None = None) -> list[str]:
         """Returns the CLI command to uninstall a package via winget."""
-        return ['winget', 'uninstall', '--id', package.name, '--silent']
+        return [
+            'winget',
+            'uninstall',
+            '--id',
+            package.name,
+            '--silent',
+            '--disable-interactivity',
+        ]
 
     @override
     async def check_updates(self, params: CheckUpdatesParameters) -> list[Package]:
@@ -96,7 +121,12 @@ class WingetEnvironment(Environment):
         """
         logger = logging.getLogger('porringer.winget.check_updates')
         output = await self._run_text_command(
-            ['winget', 'upgrade', '--accept-source-agreements', '--disable-interactivity'],
+            [
+                'winget',
+                'upgrade',
+                '--accept-source-agreements',
+                '--disable-interactivity',
+            ],
         )
         if output is None:
             return []
@@ -137,7 +167,9 @@ class WingetEnvironment(Environment):
         return results
 
     @staticmethod
-    def _parse_winget_columns(output: str) -> tuple[list[int], list[str], list[str]] | None:
+    def _parse_winget_columns(
+        output: str,
+    ) -> tuple[list[int], list[str], list[str]] | None:
         """Parse column layout from winget tabular output.
 
         Locates the dashes separator line, derives column start
@@ -171,7 +203,10 @@ class WingetEnvironment(Environment):
 
     @override
     async def packages(
-        self, *, project_path: Path | None = None, runtime_context: RuntimeContext | None = None
+        self,
+        *,
+        project_path: Path | None = None,
+        runtime_context: RuntimeContext | None = None,
     ) -> list[Package]:
         """Gathers installed packages in the given environment.
 
