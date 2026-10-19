@@ -61,6 +61,7 @@ Pre-release handling then comes from each entry's `include_prereleases`, so `--p
 | `--global` | | Check the entries of your global manifest. |
 | `--runtime` | `-r` | Check packages installed in this runtime tag. Repeatable. |
 | `--all-runtimes` | | Check packages in every runtime and every global store. |
+| `--json` | | Emit the results as JSON. |
 
 ## API Usage
 

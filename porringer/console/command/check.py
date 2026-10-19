@@ -4,6 +4,7 @@ Porringer CLI check command module for checking package updates via plugins.
 """
 
 import asyncio
+from collections.abc import Callable
 from typing import Annotated
 
 import typer
@@ -15,7 +16,9 @@ from porringer.backend.command.package import PackageCommands
 from porringer.console.common import (
     EXIT_FAILURE,
     GlobalOption,
+    JsonOption,
     create_api,
+    emit_json,
     global_manifest_or_exit,
 )
 from porringer.console.schema import ConsoleConfiguration
@@ -32,7 +35,9 @@ from porringer.schema import (
 app = typer.Typer()
 
 
-def _display_results(configuration: ConsoleConfiguration, results: list[CheckResult]) -> None:
+def _display_results(
+    configuration: ConsoleConfiguration, results: list[CheckResult]
+) -> None:
     """Display check results to the console.
 
     Args:
@@ -42,86 +47,104 @@ def _display_results(configuration: ConsoleConfiguration, results: list[CheckRes
     total_updates = sum(r.updates_available for r in results if r.success)
 
     if total_updates == 0:
-        configuration.output.print(Panel('[muted]All packages are up to date.[/muted]', border_style='dim'))
+        configuration.output.print(
+            Panel("[muted]All packages are up to date.[/muted]", border_style="dim")
+        )
         return
 
-    configuration.output.print(f'\n[heading][success]{total_updates} update(s) available[/success][/heading]\n')
+    configuration.output.print(
+        f"\n[heading][success]{total_updates} update(s) available[/success][/heading]\n"
+    )
 
     for result in results:
         if not result.success:
-            configuration.output.print(f'[warning]{result.plugin}:[/warning] [error]Error: {result.error}[/error]')
+            configuration.output.print(
+                f"[warning]{result.plugin}:[/warning] [error]Error: {result.error}[/error]"
+            )
             continue
 
         if not result.packages:
             continue
 
-        table = Table(title=f'[heading]{result.plugin}[/heading]', show_header=True)
-        table.add_column('Package', style='cyan')
-        table.add_column('Current', style='dim')
-        table.add_column('Latest', style='green')
+        table = Table(title=f"[heading]{result.plugin}[/heading]", show_header=True)
+        table.add_column("Package", style="cyan")
+        table.add_column("Current", style="dim")
+        table.add_column("Latest", style="green")
 
         for pkg in result.packages:
             table.add_row(
                 pkg.name,
-                str(pkg.current_version) if pkg.current_version else 'N/A',
-                str(pkg.latest_version) if pkg.latest_version else 'N/A',
+                str(pkg.current_version) if pkg.current_version else "N/A",
+                str(pkg.latest_version) if pkg.latest_version else "N/A",
             )
 
         configuration.output.print(table)
         configuration.output.blank()
 
 
-def _display_managed(configuration: ConsoleConfiguration, report: ManagedToolReport) -> None:
+def _display_managed(
+    configuration: ConsoleConfiguration, report: ManagedToolReport
+) -> None:
     """Display update status for the entries of a manifest."""
     for failed in report.failed_paths:
-        configuration.output.print(f'[error]{failed.path}: {failed.error}[/error]')
+        configuration.output.print(f"[error]{failed.path}: {failed.error}[/error]")
 
     outdated = [r for r in report.results if r.success and r.available_version]
     failures = [r for r in report.results if not r.success]
     if not outdated and not failures:
-        configuration.output.print(Panel('[muted]All entries are up to date.[/muted]', border_style='dim'))
+        configuration.output.print(
+            Panel("[muted]All entries are up to date.[/muted]", border_style="dim")
+        )
         return
 
     if outdated:
         table = Table(
-            title=f'[heading]{len(outdated)} update(s) available[/heading]',
+            title=f"[heading]{len(outdated)} update(s) available[/heading]",
             show_header=True,
         )
-        table.add_column('Package', style='cyan')
-        table.add_column('Installer')
-        table.add_column('Current', style='dim')
-        table.add_column('Latest', style='green')
+        table.add_column("Package", style="cyan")
+        table.add_column("Installer")
+        table.add_column("Current", style="dim")
+        table.add_column("Latest", style="green")
         for result in outdated:
             table.add_row(
-                result.package or '',
-                result.plugin or '',
-                result.installed_version or 'N/A',
+                result.package or "",
+                result.plugin or "",
+                result.installed_version or "N/A",
                 result.available_version,
             )
         configuration.output.print(table)
 
     for result in failures:
-        configuration.output.print(f'[warning]{result.package}:[/warning] [error]{result.message}[/error]')
+        configuration.output.print(
+            f"[warning]{result.package}:[/warning] [error]{result.message}[/error]"
+        )
 
 
 def _location_label(location: InventoryLocation) -> str:
     runtime = location.runtime
     if runtime is None:
         return location.plugin
-    flags = ', '.join(flag for flag, on in (('default', runtime.default), ('managed', runtime.managed)) if on)
-    detail = f'{runtime.provider}{", " + flags if flags else ""}'
-    return f'{location.plugin} on {runtime.kind} {runtime.tag} ({detail}) {runtime.executable}'
+    flags = ", ".join(
+        flag
+        for flag, on in (("default", runtime.default), ("managed", runtime.managed))
+        if on
+    )
+    detail = f"{runtime.provider}{', ' + flags if flags else ''}"
+    return f"{location.plugin} on {runtime.kind} {runtime.tag} ({detail}) {runtime.executable}"
 
 
-def _display_inventory(configuration: ConsoleConfiguration, report: InventoryReport) -> None:
+def _display_inventory(
+    configuration: ConsoleConfiguration, report: InventoryReport
+) -> None:
     """Display each location's installed packages that have updates, and any failures."""
     for failure in report.provider_failures:
-        configuration.output.error(f'{failure.provider}: {failure.error}')
+        configuration.output.error(f"{failure.provider}: {failure.error}")
     if not report.locations:
         configuration.output.print(
             Panel(
-                '[muted]No matching runtimes or package stores.[/muted]',
-                border_style='dim',
+                "[muted]No matching runtimes or package stores.[/muted]",
+                border_style="dim",
             )
         )
         return
@@ -129,22 +152,34 @@ def _display_inventory(configuration: ConsoleConfiguration, report: InventoryRep
     for location in report.locations:
         label = escape(_location_label(location))
         if location.status is InventoryStatus.ERROR:
-            configuration.output.error(f'{label}: {escape(location.error or "failed")}')
+            configuration.output.error(f"{label}: {escape(location.error or 'failed')}")
             continue
         outdated = [package for package in location.packages if package.latest_version]
         configuration.output.print(
-            f'[heading]{label}[/heading] [muted]{len(location.packages)} installed, {len(outdated)} update(s)[/muted]'
+            f"[heading]{label}[/heading] [muted]{len(location.packages)} installed, {len(outdated)} update(s)[/muted]"
         )
         if location.update_error:
-            configuration.output.warning(f'Updates unavailable: {location.update_error}')
+            configuration.output.warning(
+                f"Updates unavailable: {location.update_error}"
+            )
         if outdated:
             table = Table(show_header=True)
-            table.add_column('Package', style='cyan')
-            table.add_column('Current', style='dim')
-            table.add_column('Latest', style='green')
+            table.add_column("Package", style="cyan")
+            table.add_column("Current", style="dim")
+            table.add_column("Latest", style="green")
             for package in outdated:
-                table.add_row(package.name, package.version or 'N/A', package.latest_version)
+                table.add_row(
+                    package.name, package.version or "N/A", package.latest_version
+                )
             configuration.output.print(table)
+
+
+def _show(as_json: bool, data: object, display: Callable[[], None]) -> None:
+    """Emit *data* as JSON, or show it to a person with *display*."""
+    if as_json:
+        emit_json(data)
+    else:
+        display()
 
 
 @app.callback(invoke_without_command=True)
@@ -153,28 +188,29 @@ def check_default(
     *,
     plugin: Annotated[
         list[str] | None,
-        typer.Option('--plugin', '-p', help='Plugin(s) to check. Omit to check all.'),
+        typer.Option("--plugin", "-p", help="Plugin(s) to check. Omit to check all."),
     ] = None,
     include_prereleases: Annotated[
         bool,
-        typer.Option('--prereleases', help='Include pre-release versions'),
+        typer.Option("--prereleases", help="Include pre-release versions"),
     ] = False,
     global_: GlobalOption = False,
     runtime: Annotated[
         list[str] | None,
         typer.Option(
-            '--runtime',
-            '-r',
-            help='Check packages installed in this runtime, such as 3.14 (repeatable)',
+            "--runtime",
+            "-r",
+            help="Check packages installed in this runtime, such as 3.14 (repeatable)",
         ),
     ] = None,
     all_runtimes: Annotated[
         bool,
         typer.Option(
-            '--all-runtimes',
-            help='Check packages in every runtime and every global store',
+            "--all-runtimes",
+            help="Check packages in every runtime and every global store",
         ),
     ] = False,
+    as_json: JsonOption = False,
 ) -> None:
     """Check for available package updates via plugins.
 
@@ -194,7 +230,9 @@ def check_default(
     configuration = context.ensure_object(ConsoleConfiguration)
 
     if sum((global_, runtime is not None, all_runtimes)) > 1:
-        configuration.output.error('Use only one of --global, --runtime and --all-runtimes')
+        configuration.output.error(
+            "Use only one of --global, --runtime and --all-runtimes"
+        )
         raise typer.Exit(EXIT_FAILURE)
 
     if runtime is not None or all_runtimes:
@@ -207,12 +245,18 @@ def check_default(
                 include_prereleases=include_prereleases,
             )
         )
-        unmatched = [w for w in runtime or [] if not any(runtime_tag_matches(r.tag, w) for r in report.runtimes)]
+        unmatched = [
+            w
+            for w in runtime or []
+            if not any(runtime_tag_matches(r.tag, w) for r in report.runtimes)
+        ]
         if unmatched:
-            known = ', '.join(sorted({r.tag for r in report.runtimes})) or 'none'
-            configuration.output.error(f'No runtime matches {", ".join(unmatched)} (available: {known})')
+            known = ", ".join(sorted({r.tag for r in report.runtimes})) or "none"
+            configuration.output.error(
+                f"No runtime matches {', '.join(unmatched)} (available: {known})"
+            )
             raise typer.Exit(EXIT_FAILURE)
-        _display_inventory(configuration, report)
+        _show(as_json, report, lambda: _display_inventory(configuration, report))
         if not report.success:
             raise typer.Exit(EXIT_FAILURE)
         return
@@ -225,9 +269,13 @@ def check_default(
             raise typer.Exit(EXIT_FAILURE)
         api = create_api(configuration)
         path = global_manifest_or_exit(configuration, api)
-        report = asyncio.run(api.tool.check_updates(paths=[path], plugin_names=set(plugin) if plugin else None))
-        _display_managed(configuration, report)
-        if not report.success:
+        managed = asyncio.run(
+            api.tool.check_updates(
+                paths=[path], plugin_names=set(plugin) if plugin else None
+            )
+        )
+        _show(as_json, managed, lambda: _display_managed(configuration, managed))
+        if not managed.success:
             raise typer.Exit(EXIT_FAILURE)
         return
 
@@ -237,4 +285,4 @@ def check_default(
     )
 
     results = asyncio.run(PackageCommands.check_updates(params))
-    _display_results(configuration, results)
+    _show(as_json, results, lambda: _display_results(configuration, results))

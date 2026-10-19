@@ -29,7 +29,7 @@ Use Porringer when you want one repeatable entry point for setup while still rel
 | `porringer add` | Install a package and record it in a manifest (your global one by default). |
 | `porringer upgrade` | Upgrade a manifest entry, optionally moving its constraint up. |
 | `porringer remove` | Uninstall a package and drop its manifest entry. |
-| `porringer plugin list` | List available installer, project, runtime, and SCM plugins. |
+| `porringer plugin list` | List available installer, project, runtime, and SCM plugins. `--json` emits them as JSON. |
 | `porringer env info` | Print local environment and plugin diagnostics. |
 | `porringer schema` | Export the manifest JSON Schema. |
 | `porringer self check` | Check PyPI for a newer Porringer release. |

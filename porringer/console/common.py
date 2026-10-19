@@ -4,12 +4,16 @@ Shared helpers and constants for Porringer CLI commands.
 """
 
 import asyncio
+import dataclasses
+import json
 import sys
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from typing import Annotated
 
 import typer
+from pydantic import BaseModel
 
 from porringer.api import API
 from porringer.console.schema import ConsoleConfiguration
@@ -19,6 +23,35 @@ from porringer.schema import InspectionMode, SetupParameters, SetupProfile, Sync
 # Process exit codes shared across CLI commands.
 EXIT_SUCCESS = 0
 EXIT_FAILURE = 1
+
+JsonOption = Annotated[bool, typer.Option("--json", help="Emit machine-readable JSON")]
+
+
+def _jsonable(value: object) -> object:
+    """Convert models, dataclasses, enums, and other values to JSON-compatible data."""
+    if isinstance(value, BaseModel):
+        return value.model_dump(mode="json")
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        return {
+            field.name: _jsonable(getattr(value, field.name))
+            for field in dataclasses.fields(value)
+        }
+    if isinstance(value, Enum):
+        return value.value
+    if isinstance(value, dict):
+        return {str(key): _jsonable(item) for key, item in value.items()}
+    if isinstance(value, list | tuple | set | frozenset):
+        return [_jsonable(item) for item in value]
+    return (
+        value
+        if value is None or isinstance(value, str | int | float | bool)
+        else str(value)
+    )
+
+
+def emit_json(data: object) -> None:
+    """Print *data* as indented JSON."""
+    typer.echo(json.dumps(_jsonable(data), indent=2))
 
 
 def create_api(configuration: ConsoleConfiguration) -> API:
@@ -31,7 +64,9 @@ def _stdin_is_interactive() -> bool:
     return sys.stdin.isatty()
 
 
-def confirm_or_abort(configuration: ConsoleConfiguration, *, yes: bool, prompt: str) -> None:
+def confirm_or_abort(
+    configuration: ConsoleConfiguration, *, yes: bool, prompt: str
+) -> None:
     """Require confirmation for *prompt* unless ``yes`` was provided.
 
     An explicit decline (answering "n") is a normal outcome, so it prints a
@@ -49,8 +84,8 @@ def confirm_or_abort(configuration: ConsoleConfiguration, *, yes: bool, prompt: 
     console = configuration.output.console
     if _stdin_is_interactive() and not console.is_terminal:
         configuration.output.warning(
-            'Cannot ask for confirmation while output is redirected. '
-            'Pass --yes or set PORRINGER_ASSUME_YES=1 to run non-interactively.'
+            "Cannot ask for confirmation while output is redirected. "
+            "Pass --yes or set PORRINGER_ASSUME_YES=1 to run non-interactively."
         )
         raise typer.Exit(EXIT_FAILURE)
 
@@ -58,23 +93,25 @@ def confirm_or_abort(configuration: ConsoleConfiguration, *, yes: bool, prompt: 
         try:
             # markup=False: the "[y/N]" default hint would otherwise be
             # parsed as an invalid, unclosed Rich style tag.
-            answer = console.input(f'{prompt} [y/N]: ', markup=False).strip().lower()
+            answer = console.input(f"{prompt} [y/N]: ", markup=False).strip().lower()
         except KeyboardInterrupt:
             console.print()
-            configuration.output.print('[muted]Aborted.[/muted]')
+            configuration.output.print("[muted]Aborted.[/muted]")
             raise typer.Exit(EXIT_SUCCESS) from None
         except EOFError:
             console.print()
-            configuration.output.warning('Aborted. Pass --yes or set PORRINGER_ASSUME_YES=1 to run non-interactively.')
+            configuration.output.warning(
+                "Aborted. Pass --yes or set PORRINGER_ASSUME_YES=1 to run non-interactively."
+            )
             raise typer.Exit(EXIT_FAILURE) from None
 
-        if answer in {'y', 'yes'}:
+        if answer in {"y", "yes"}:
             return
-        if answer in {'', 'n', 'no'}:
-            configuration.output.print('[muted]Aborted.[/muted]')
+        if answer in {"", "n", "no"}:
+            configuration.output.print("[muted]Aborted.[/muted]")
             raise typer.Exit(EXIT_SUCCESS)
 
-        configuration.output.warning('Please answer y or n.')
+        configuration.output.warning("Please answer y or n.")
 
 
 async def sniff_profile(api: API, url: str) -> SetupProfile | None:
@@ -90,7 +127,7 @@ async def sniff_profile(api: API, url: str) -> SetupProfile | None:
     try:
         return await api.profile.resolve(url)
     except ValueError as exc:
-        if 'Failed to parse profile' in str(exc):
+        if "Failed to parse profile" in str(exc):
             return None
         raise
 
@@ -100,10 +137,12 @@ def parse_strategy(configuration: ConsoleConfiguration, strategy: str) -> SyncSt
 
     Exits with :data:`EXIT_FAILURE` when *strategy* is not recognized.
     """
-    strategy_map = {'minimal': SyncStrategy.MINIMAL, 'latest': SyncStrategy.LATEST}
+    strategy_map = {"minimal": SyncStrategy.MINIMAL, "latest": SyncStrategy.LATEST}
     sync_strategy = strategy_map.get(strategy.lower())
     if sync_strategy is None:
-        configuration.output.error(f"Invalid strategy '{strategy}'. Use: minimal or latest")
+        configuration.output.error(
+            f"Invalid strategy '{strategy}'. Use: minimal or latest"
+        )
         raise typer.Exit(EXIT_FAILURE)
     return sync_strategy
 
@@ -122,7 +161,9 @@ class TargetPlan:
         return self.profile_url is not None
 
 
-def resolve_target_or_exit(configuration: ConsoleConfiguration, target: str | None) -> TargetResolution:
+def resolve_target_or_exit(
+    configuration: ConsoleConfiguration, target: str | None
+) -> TargetResolution:
     """Resolve a CLI target, exiting with an error on an invalid target."""
     try:
         return resolve_target(target)
@@ -131,20 +172,24 @@ def resolve_target_or_exit(configuration: ConsoleConfiguration, target: str | No
         raise typer.Exit(EXIT_FAILURE) from exc
 
 
-def target_to_paths(configuration: ConsoleConfiguration, target: TargetResolution) -> Path | list[str] | None:
+def target_to_paths(
+    configuration: ConsoleConfiguration, target: TargetResolution
+) -> Path | list[str] | None:
     """Resolve a non-profile target to manifest path(s), exiting on a bad path."""
     if target.kind == TargetKind.PATH:
         if target.path is None or not target.path.exists():
-            configuration.output.error(f'Path does not exist: {target.path}')
+            configuration.output.error(f"Path does not exist: {target.path}")
             raise typer.Exit(EXIT_FAILURE)
         return target.path.resolve()
     if target.kind == TargetKind.URL and target.url is not None:
         return [target.url]
-    configuration.output.error(f'Unsupported target: {target.kind}')
+    configuration.output.error(f"Unsupported target: {target.kind}")
     raise typer.Exit(EXIT_FAILURE)
 
 
-def classify_target(configuration: ConsoleConfiguration, api: API, target: TargetResolution) -> TargetPlan:
+def classify_target(
+    configuration: ConsoleConfiguration, api: API, target: TargetResolution
+) -> TargetPlan:
     """Classify a resolved target as a setup profile or manifest paths.
 
     A bare ``https`` URL is ambiguous, so a strict profile parse decides
@@ -161,9 +206,11 @@ def classify_target(configuration: ConsoleConfiguration, api: API, target: Targe
 
     if target.kind == TargetKind.LINK:
         if target.profile_url is None:
-            configuration.output.error('Install link target is missing profile URL')
+            configuration.output.error("Install link target is missing profile URL")
             raise typer.Exit(EXIT_FAILURE)
-        return TargetPlan(profile_url=target.profile_url, expected_hash=target.expected_hash)
+        return TargetPlan(
+            profile_url=target.profile_url, expected_hash=target.expected_hash
+        )
 
     return TargetPlan(manifest_paths=target_to_paths(configuration, target))
 
@@ -201,30 +248,34 @@ def build_setup_parameters(
 # command's parameter (e.g. ``target: TargetArgument = None``).
 TargetArgument = Annotated[
     str | None,
-    typer.Argument(help='Manifest path, https URL, or porringer:// install link. Defaults to the nearest manifest.'),
+    typer.Argument(
+        help="Manifest path, https URL, or porringer:// install link. Defaults to the nearest manifest."
+    ),
 ]
 ProjectDirOption = Annotated[
     Path | None,
-    typer.Option('--project-dir', '-d', help='Working directory for project-install actions'),
+    typer.Option(
+        "--project-dir", "-d", help="Working directory for project-install actions"
+    ),
 ]
 StrategyOption = Annotated[
     str,
-    typer.Option('--strategy', '-s', help='Version strategy: minimal or latest'),
+    typer.Option("--strategy", "-s", help="Version strategy: minimal or latest"),
 ]
 PluginOption = Annotated[
     list[str] | None,
-    typer.Option('--plugin', help='Limit actions to these plugins (repeatable)'),
+    typer.Option("--plugin", help="Limit actions to these plugins (repeatable)"),
 ]
 OnlyActionOption = Annotated[
     list[str] | None,
     typer.Option(
-        '--only-action',
-        help='Run only these stable action ids, such as 0:2 (repeatable)',
+        "--only-action",
+        help="Run only these stable action ids, such as 0:2 (repeatable)",
     ),
 ]
 GlobalOption = Annotated[
     bool,
-    typer.Option('--global', help="Use your global manifest instead of a project's"),
+    typer.Option("--global", help="Use your global manifest instead of a project's"),
 ]
 
 
@@ -237,11 +288,13 @@ def global_manifest_or_exit(
 ) -> Path:
     """Return the global manifest path, exiting when it can't be used."""
     if target is not None or project_dir is not None:
-        configuration.output.error('--global cannot be combined with a target or --project-dir')
+        configuration.output.error(
+            "--global cannot be combined with a target or --project-dir"
+        )
         raise typer.Exit(EXIT_FAILURE)
     path = api.global_manifest_path
     if not path.is_file():
-        configuration.output.print(f'[muted]No global manifest yet: {path}[/muted]')
+        configuration.output.print(f"[muted]No global manifest yet: {path}[/muted]")
         raise typer.Exit(EXIT_SUCCESS)
     return path
 
