@@ -29,6 +29,8 @@ While any remain, the removal is refused and they are listed. `--cascade` remove
 
 A runtime installed by something else (for example python.org's installer when the entry uses `pim`) is skipped as `NOT_MANAGED` rather than reported as missing.
 
+To move to a new runtime, remove the old one with `--cascade`, then `add` the new runtime and each entry again with the new `--runtime` (or without one, to follow the default interpreter).
+
 ## Options
 
 | Option | Short | Description |
