@@ -39,7 +39,9 @@ from porringer.utility.concurrency import gather_bounded
 from porringer.utility.trace import CommandTrace
 
 
-def _pick_highest_version(releases: dict[str, object], *, stable_only: bool) -> Version | None:
+def _pick_highest_version(
+    releases: dict[str, object], *, stable_only: bool
+) -> Version | None:
     """Return the highest ``Version`` from *releases* keys, or ``None``.
 
     Args:
@@ -59,34 +61,30 @@ def _pick_highest_version(releases: dict[str, object], *, stable_only: bool) -> 
     return best
 
 
-def _running_in_isolated_app_venv() -> bool:
-    """Return whether porringer itself runs from an isolated pipx-managed venv.
-
-    ``pipx install porringer`` places porringer in its own dedicated
-    virtual environment and writes a ``pipx_metadata.json`` marker into
-    the venv prefix.  When that is the case, ``sys.executable`` points at
-    porringer's private interpreter, which has none of the user's
-    packages or tools.  Package presence detection and generated install
-    commands must target the user's default interpreter instead.
-    """
-    return (Path(sys.prefix) / 'pipx_metadata.json').is_file()
+def _venv_base_python() -> str | None:
+    """Return the interpreter the running virtual environment was created from, or ``None`` outside one."""
+    if sys.prefix == sys.base_prefix:
+        return None
+    base = getattr(sys, "_base_executable", "")
+    return base if base and Path(base).is_file() else None
 
 
-def _default_python() -> str:
+def default_python() -> str:
     """Return the interpreter to target when no runtime override applies.
 
-    Normally this is the running interpreter (``sys.executable``).  But
-    when porringer runs from a frozen binary (``sys.frozen``) or from an
-    isolated pipx-managed venv, ``sys.executable`` is *not* the user's
-    environment, so prefer a real Python found on ``PATH``.  Falls back
-    to ``sys.executable`` when no PATH Python can be located.
+    Packages and tools belong to the user's interpreter, never to the
+    environment Porringer itself runs from. Inside a virtual environment
+    (a project ``.venv`` or Porringer's own pipx venv) that is the base
+    interpreter the venv was created from; in a frozen binary it is the
+    ``python`` on ``PATH``. Otherwise it is the running interpreter.
     """
-    if getattr(sys, 'frozen', False) or _running_in_isolated_app_venv():
-        for candidate in ('python', 'python3'):
+    if getattr(sys, "frozen", False):
+        for candidate in ("python", "python3"):
             found = shutil.which(candidate)
             if found is not None:
                 return found
-    return sys.executable
+        return sys.executable
+    return _venv_base_python() or sys.executable
 
 
 class PythonEnvironment(Environment, RuntimeConsumer):
@@ -104,17 +102,17 @@ class PythonEnvironment(Environment, RuntimeConsumer):
     @staticmethod
     def ecosystem() -> Ecosystem:
         """Python-ecosystem plugins all share the `'python'` ecosystem."""
-        return Ecosystem('python')
+        return Ecosystem("python")
 
     @staticmethod
     def package_name_validator() -> str:
         """Python packages use PEP 440 validation."""
-        return 'pep440'
+        return "pep440"
 
     @classmethod
     def consumed_runtime_kind(cls) -> str:
         """Python environment plugins consume a Python runtime."""
-        return 'python'
+        return "python"
 
     @classmethod
     def package_scope(cls) -> PackageScope:
@@ -161,7 +159,7 @@ class PythonEnvironment(Environment, RuntimeConsumer):
 
         # Determine which interpreter to probe
         exe = runtime_context.get(cls.consumed_runtime_kind())
-        python = str(exe) if exe is not None else _default_python()
+        python = str(exe) if exe is not None else default_python()
 
         return cls._probe_module(python, tool)
 
@@ -183,7 +181,7 @@ class PythonEnvironment(Environment, RuntimeConsumer):
         Returns:
             ``True`` if the import succeeds, ``False`` otherwise.
         """
-        args = [python, '-c', f'import {module}']
+        args = [python, "-c", f"import {module}"]
         trace = CommandTrace.start(args)
         try:
             result = subprocess.run(
@@ -192,40 +190,44 @@ class PythonEnvironment(Environment, RuntimeConsumer):
                 timeout=10,
                 check=False,
             )
-            trace.finish(returncode=result.returncode, stdout=result.stdout, stderr=result.stderr)
+            trace.finish(
+                returncode=result.returncode, stdout=result.stdout, stderr=result.stderr
+            )
             return result.returncode == 0
         except (OSError, subprocess.SubprocessError) as exc:
-            trace.finish(returncode=None, error=f'{type(exc).__name__}: {exc}')
+            trace.finish(returncode=None, error=f"{type(exc).__name__}: {exc}")
             return False
 
     def python_command(self, runtime_context: RuntimeContext | None = None) -> str:
         """The Python interpreter command to target.
 
         Returns the runtime override path from *runtime_context* when
-        a matching runtime kind is available, otherwise falls back to
-        the running interpreter (``sys.executable``).
+        a matching runtime kind is available, otherwise the user's
+        default interpreter (see ``default_python``).
 
         Args:
             runtime_context: Resolved runtime paths for this execution
-                run.  ``None`` means use the current process interpreter.
+                run.  ``None`` means use the default interpreter.
         """
-        _logger = logging.getLogger('porringer.python_environment')
+        _logger = logging.getLogger("porringer.python_environment")
         kind = self.consumed_runtime_kind()
         if runtime_context is not None:
             exe = runtime_context.get(kind)
             if exe is not None:
-                _logger.debug('python_command: using runtime override %s for kind=%s', exe, kind)
+                _logger.debug(
+                    "python_command: using runtime override %s for kind=%s", exe, kind
+                )
                 return str(exe)
-            _logger.debug('python_command: runtime_context present but no entry for kind=%s', kind)
+            _logger.debug(
+                "python_command: runtime_context present but no entry for kind=%s", kind
+            )
         else:
-            _logger.debug('python_command: no runtime_context supplied, falling back to default interpreter')
+            _logger.debug(
+                "python_command: no runtime_context supplied, falling back to default interpreter"
+            )
 
-        # When porringer runs from a frozen binary or an isolated pipx
-        # venv, sys.executable is not the user's interpreter.  Prefer a
-        # real Python found on PATH instead.  In the normal case this
-        # simply returns sys.executable.
-        resolved = _default_python()
-        _logger.debug('python_command: using default interpreter %s', resolved)
+        resolved = default_python()
+        _logger.debug("python_command: using default interpreter %s", resolved)
         return resolved
 
     @staticmethod
@@ -261,18 +263,20 @@ class PythonEnvironment(Environment, RuntimeConsumer):
         Returns:
             Path to the venv Python, or `None` if no venv is found.
         """
-        venv_dir = project_path / '.venv'
+        venv_dir = project_path / ".venv"
         if not venv_dir.is_dir():
             return None
 
-        if sys.platform == 'win32':
-            python = venv_dir / 'Scripts' / 'python.exe'
+        if sys.platform == "win32":
+            python = venv_dir / "Scripts" / "python.exe"
         else:
-            python = venv_dir / 'bin' / 'python'
+            python = venv_dir / "bin" / "python"
 
         return python if python.is_file() else None
 
-    async def _check_pypi_updates(self, params: CheckUpdatesParameters) -> list[Package]:
+    async def _check_pypi_updates(
+        self, params: CheckUpdatesParameters
+    ) -> list[Package]:
         """Query the PyPI JSON API for newer versions of the requested packages.
 
         For each package in *params.packages*, fetches
@@ -295,7 +299,7 @@ class PythonEnvironment(Environment, RuntimeConsumer):
             A list of packages with their ``version`` set to the latest
             available on PyPI.
         """
-        logger = logging.getLogger(f'porringer.{self.tool_name()}.check_pypi')
+        logger = logging.getLogger(f"porringer.{self.tool_name()}.check_pypi")
 
         async with (
             contextlib.nullcontext(params.http_client)
@@ -306,7 +310,9 @@ class PythonEnvironment(Environment, RuntimeConsumer):
             def _make_check(
                 pkg_ref: PackageRef,
             ) -> Callable[[], Awaitable[Package | None]]:
-                return lambda: self._check_single_pypi_package(session, pkg_ref, params.include_prereleases, logger)
+                return lambda: self._check_single_pypi_package(
+                    session, pkg_ref, params.include_prereleases, logger
+                )
 
             gathered = await gather_bounded(
                 (_make_check(pkg_ref) for pkg_ref in params.packages),
@@ -324,19 +330,25 @@ class PythonEnvironment(Environment, RuntimeConsumer):
     ) -> Package | None:
         """Fetch one package from PyPI and return the latest version, or ``None``."""
         try:
-            async with session.get(f'https://pypi.org/pypi/{pkg_ref.name}/json') as response:
+            async with session.get(
+                f"https://pypi.org/pypi/{pkg_ref.name}/json"
+            ) as response:
                 response.raise_for_status()
                 data = await response.json()
         except (aiohttp.ClientError, ValueError, KeyError) as exc:
-            logger.debug('PyPI query failed for %s: %s', pkg_ref.name, exc)
+            logger.debug("PyPI query failed for %s: %s", pkg_ref.name, exc)
             return None
 
         if include_prereleases:
-            best = _pick_highest_version(data.get('releases', {}), stable_only=False)
-            return Package(name=pkg_ref.name, version=str(best)) if best is not None else None
+            best = _pick_highest_version(data.get("releases", {}), stable_only=False)
+            return (
+                Package(name=pkg_ref.name, version=str(best))
+                if best is not None
+                else None
+            )
 
         # Stable-only: prefer info.version when it is itself stable.
-        version_str = data.get('info', {}).get('version')
+        version_str = data.get("info", {}).get("version")
         if version_str:
             try:
                 if not Version(version_str).is_prerelease:
@@ -345,7 +357,7 @@ class PythonEnvironment(Environment, RuntimeConsumer):
                 return Package(name=pkg_ref.name, version=version_str)
 
         # info.version was a pre-release or missing — scan releases.
-        best_stable = _pick_highest_version(data.get('releases', {}), stable_only=True)
+        best_stable = _pick_highest_version(data.get("releases", {}), stable_only=True)
         if best_stable is not None:
             return Package(name=pkg_ref.name, version=str(best_stable))
         return None
