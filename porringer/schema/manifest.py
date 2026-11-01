@@ -5,14 +5,14 @@ Manifest schemas.
 
 import hashlib
 import os
-from collections.abc import Iterator
+from collections.abc import Collection, Iterator
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
 from packaging.utils import canonicalize_name
-from pydantic import Field, HttpUrl, model_validator
+from pydantic import Field, HttpUrl, StringConstraints, model_validator
 
 from porringer.core.schema import (
     Ecosystem,
@@ -28,6 +28,9 @@ MANIFEST_SCHEMA_URL = 'https://synodic.github.io/porringer/schema.json'
 
 MANIFEST_SCHEMA_DIALECT = 'https://json-schema.org/draft/2020-12/schema'
 """JSON Schema dialect (``$schema``) the generated manifest schema conforms to."""
+
+GroupName = Annotated[str, StringConstraints(pattern=r'^[a-z0-9][a-z0-9-]*$')]
+"""Name of an optional entry group: lowercase letters, digits and hyphens."""
 
 
 class ManifestDiagnosticSeverity(Enum):
@@ -102,6 +105,11 @@ class PackageSpec(PlatformScoped):
         default=None,
         description='Runtime tag the installer runs under (e.g. "3.14"); packages and tools only',
     )
+    group: GroupName | None = Field(
+        default=None,
+        description='Optional group this entry belongs to; it is installed only when that group is selected. '
+        'The group must be declared under "groups".',
+    )
 
     @model_validator(mode='before')
     @classmethod
@@ -110,6 +118,12 @@ class PackageSpec(PlatformScoped):
         if isinstance(data, str):
             return {'name': data}
         return data
+
+
+class ManifestGroup(PorringerModel):
+    """An optional set of manifest entries that callers opt into by name."""
+
+    description: str | None = Field(default=None, description='Human-readable purpose of the group')
 
 
 class SetupManifest(PorringerModel):
@@ -155,6 +169,11 @@ class SetupManifest(PorringerModel):
         default_factory=dict,
         description='Preferred installer per ecosystem (e.g. {"python": "uv"})',
     )
+    groups: dict[GroupName, ManifestGroup] = Field(
+        default_factory=dict,
+        description='Optional entry groups. Entries that name a group are skipped unless the group is selected '
+        '(e.g. {"maintainer": {"description": "Release tools"}})',
+    )
 
     @model_validator(mode='before')
     @classmethod
@@ -180,6 +199,45 @@ class SetupManifest(PorringerModel):
                 if spec.runtime is not None:
                     raise ValueError(f"{kind.value}.{ecosystem}[{index}]: 'runtime' applies only to packages and tools")
         return self
+
+    @model_validator(mode='after')
+    def _groups_are_declared(self) -> SetupManifest:
+        """Reject entries that name a group missing from ``groups``."""
+        for kind, ecosystem, packages in self.iter_sections():
+            for index, spec in enumerate(packages):
+                if spec.group is not None and spec.group not in self.groups:
+                    raise ValueError(
+                        f"{kind.value}.{ecosystem}[{index}]: group '{spec.group}' is not declared in 'groups'"
+                    )
+        return self
+
+    def select_groups(self, selected: Collection[str]) -> SetupManifest:
+        """Return a copy without the entries of optional groups that are not *selected*.
+
+        Entries without a group are always kept. Unknown names in *selected* are ignored.
+        """
+        update: dict[str, dict[Ecosystem, list[PackageSpec]]] = {}
+        for kind in PluginKind:
+            section: dict[Ecosystem, list[PackageSpec]] | None = getattr(self, kind.value, None)
+            if not section:
+                continue
+            filtered = {
+                ecosystem: kept
+                for ecosystem, packages in section.items()
+                if (kept := [spec for spec in packages if spec.group is None or spec.group in selected])
+            }
+            if filtered != section:
+                update[kind.value] = filtered
+        return self.model_copy(update=update) if update else self
+
+    def group_entries(self, group: str) -> list[PackageSpec]:
+        """Return the entries of *group* that apply to the current platform."""
+        return [
+            spec
+            for _kind, _ecosystem, packages in self.iter_sections()
+            for spec in packages
+            if spec.group == group and spec.is_applicable()
+        ]
 
     def iter_sections(
         self,
@@ -242,6 +300,23 @@ class ManifestResult:
     manifest: SetupManifest
 
 
+@dataclass(frozen=True, slots=True)
+class ManifestGroupInfo:
+    """An optional entry group declared by a manifest and whether it was selected.
+
+    Args:
+        name: Group name, as passed to ``--with``.
+        description: Human-readable purpose of the group.
+        selected: Whether the group's entries are part of the plan.
+        entries: Number of the group's entries that apply to this platform.
+    """
+
+    name: str
+    description: str | None = None
+    selected: bool = False
+    entries: int = 0
+
+
 @dataclass(slots=True)
 class ManifestMetadata:
     """Display metadata from a setup manifest.
@@ -254,9 +329,11 @@ class ManifestMetadata:
         description: Short description shown in the install preview header.
         author: Author or organization name.
         url: Project URL for reference.
+        groups: Optional entry groups the manifest declares.
     """
 
     name: str | None = None
     description: str | None = None
     author: str | None = None
     url: str | None = None
+    groups: tuple[ManifestGroupInfo, ...] = ()

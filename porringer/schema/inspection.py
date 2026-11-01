@@ -54,6 +54,7 @@ class ActionSnapshot(PorringerModel):
     include_prereleases: bool = False
     runtime_tag: str | None = None
     entry_id: str | None = None
+    group: str | None = None
 
 
 class ActionInspection(PorringerModel):
@@ -92,6 +93,15 @@ class ManifestDiagnosticSnapshot(PorringerModel):
     severity: str
 
 
+class ManifestGroupSnapshot(PorringerModel):
+    """JSON-stable projection of an optional entry group."""
+
+    name: str
+    description: str | None = None
+    selected: bool = False
+    entries: int = 0
+
+
 class ManifestMetadataSnapshot(PorringerModel):
     """JSON-stable projection of manifest display metadata."""
 
@@ -99,6 +109,7 @@ class ManifestMetadataSnapshot(PorringerModel):
     description: str | None = None
     author: str | None = None
     url: str | None = None
+    groups: tuple[ManifestGroupSnapshot, ...] = Field(default_factory=tuple)
 
 
 class ManifestInspection(PorringerModel):

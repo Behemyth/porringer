@@ -17,6 +17,29 @@
             },
             "pytest",
             "pytest-asyncio"
+        ],
+        "system": [
+            {
+                "name": "GitHub.cli",
+                "description": "GitHub CLI for pull requests, releases, and repository settings",
+                "installer": "winget",
+                "platforms": ["win32"],
+                "group": "maintainer"
+            },
+            {
+                "name": "gh",
+                "description": "GitHub CLI for pull requests, releases, and repository settings",
+                "installer": "brew",
+                "platforms": ["darwin"],
+                "group": "maintainer"
+            },
+            {
+                "name": "gh",
+                "description": "GitHub CLI for pull requests, releases, and repository settings",
+                "installer": "apt",
+                "platforms": ["linux"],
+                "group": "maintainer"
+            }
         ]
     },
     "tools": {
@@ -26,5 +49,10 @@
                 "description": "Python package and dependency manager"
             }
         ]
+    },
+    "groups": {
+        "maintainer": {
+            "description": "Repository administration and release tools"
+        }
     }
 }

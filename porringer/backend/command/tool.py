@@ -82,6 +82,7 @@ class ToolCommands:
         include_packages: set[str] | None = None,
         action_ids: set[str] | None = None,
         entry_ids: set[str] | None = None,
+        groups: set[str] | None = None,
     ) -> ManagedToolReport:
         """Check manifests for managed packages with updates available.
 
@@ -95,6 +96,7 @@ class ToolCommands:
             include_packages=include_packages,
             action_ids=action_ids,
             entry_ids=entry_ids,
+            groups=groups or set(),
             fail_fast=False,
         )
         report = await self._sync.inspect(params, plugins=plugins)
@@ -109,6 +111,7 @@ class ToolCommands:
         include_packages: set[str] | None = None,
         action_ids: set[str] | None = None,
         entry_ids: set[str] | None = None,
+        groups: set[str] | None = None,
         on_event: Callable[[ProgressEvent], object] | None = None,
     ) -> ManagedToolReport:
         """Upgrade managed packages declared by manifests.
@@ -124,6 +127,7 @@ class ToolCommands:
             include_packages=include_packages,
             action_ids=action_ids,
             entry_ids=entry_ids,
+            groups=groups or set(),
             fail_fast=False,
         )
         report = await self._sync.run(params, plugins=plugins, on_event=on_event)
@@ -138,6 +142,7 @@ class ToolCommands:
         include_packages: set[str] | None = None,
         action_ids: set[str] | None = None,
         entry_ids: set[str] | None = None,
+        groups: set[str] | None = None,
         on_event: Callable[[ProgressEvent], object] | None = None,
     ) -> ManagedToolReport:
         """Uninstall managed packages declared by manifests.
@@ -160,6 +165,7 @@ class ToolCommands:
             include_packages=include_packages,
             action_ids=action_ids,
             entry_ids=entry_ids,
+            groups=groups or set(),
             fail_fast=False,
         )
         report = await self._sync._run_exclusive(

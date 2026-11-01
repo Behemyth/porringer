@@ -18,6 +18,9 @@ from porringer.core.plugin_schema.environment import (
 from porringer.core.plugin_schema.runtime import RuntimeContext
 from porringer.core.schema import Ecosystem, Package, PackageRef
 
+# Shortest dash run treated as a table separator; a lone `-` is a progress-spinner frame.
+_MIN_SEPARATOR_LENGTH = 3
+
 
 class WingetEnvironment(Environment):
     """Represents a Windows environment managed by winget.
@@ -183,7 +186,7 @@ class WingetEnvironment(Environment):
         sep_idx: int | None = None
         for i, line in enumerate(lines):
             stripped = line.strip()
-            if stripped and all(c == '-' for c in stripped):
+            if len(stripped) >= _MIN_SEPARATOR_LENGTH and all(c == '-' for c in stripped):
                 sep_idx = i
                 break
 
@@ -208,7 +211,7 @@ class WingetEnvironment(Environment):
         project_path: Path | None = None,
         runtime_context: RuntimeContext | None = None,
     ) -> list[Package]:
-        """Gathers installed packages in the given environment.
+        """Lists installed packages via ``winget list``.
 
         winget manages system packages globally; *project_path* is
         accepted for interface compatibility but has no effect.
@@ -218,6 +221,42 @@ class WingetEnvironment(Environment):
             runtime_context: Unused.  winget is not Python-scoped.
 
         Returns:
-            A list of packages
+            A list of installed packages keyed by winget identifier
         """
-        return []
+        logger = logging.getLogger('porringer.winget.packages')
+        output = await self._run_text_command(
+            ['winget', 'list', '--accept-source-agreements', '--disable-interactivity'],
+            check=True,
+        )
+        if output is None:
+            return []
+
+        columns = self._parse_winget_columns(output)
+        if columns is None:
+            logger.debug('Could not parse winget list header')
+            return []
+
+        col_starts, col_names, data_lines = columns
+        lowered = [name.lower() for name in col_names]
+        if 'id' not in lowered or 'version' not in lowered:
+            logger.debug('Could not find Id/Version columns in winget header: %s', col_names)
+            return []
+        id_col = lowered.index('id')
+        version_col = lowered.index('version')
+
+        def _col(line: str, col_index: int) -> str:
+            start = col_starts[col_index]
+            end = col_starts[col_index + 1] if col_index + 1 < len(col_starts) else len(line)
+            return line[start:end].strip()
+
+        packages: list[Package] = []
+        for line in data_lines:
+            if len(line) <= col_starts[version_col]:
+                continue
+            pkg_id = _col(line, id_col)
+            if not pkg_id:
+                continue
+            # winget prefixes approximate versions with ``<`` or ``>``.
+            version = _col(line, version_col).lstrip('<> ') or 'unknown'
+            packages.append(Package(name=pkg_id, version=version))
+        return packages

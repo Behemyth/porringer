@@ -21,6 +21,7 @@ import json
 import logging
 import tomllib
 from collections.abc import Callable
+from itertools import combinations
 from pathlib import Path
 
 from packaging.requirements import InvalidRequirement, Requirement
@@ -639,16 +640,20 @@ def _validate_duplicate_packages(
     manifest: SetupManifest,
     warning_callback: Callable[[str, str, ManifestValidationCode], None],
 ) -> None:
-    """Warn when packages appear under multiple sections."""
-    seen: dict[str, list[str]] = {}
+    """Warn when a package is listed more than once for the same platform."""
+    seen: dict[str, list[tuple[str, frozenset[str]]]] = {}
     for kind, ecosystem, packages in manifest.iter_sections():
         label = f'{kind.value}.{ecosystem}'
         for spec in packages:
             canonical = str(canonicalize_name(spec.name.name))
-            seen.setdefault(canonical, []).append(label)
+            seen.setdefault(canonical, []).append((label, frozenset(spec.platforms)))
 
-    for pkg_name, locations in seen.items():
-        if len(locations) > 1:
+    for pkg_name, entries in seen.items():
+        overlapping = any(
+            not first or not second or first & second for (_, first), (_, second) in combinations(entries, 2)
+        )
+        if overlapping:
+            locations = [label for label, _platforms in entries]
             warning_callback(
                 locations[0],
                 f"Package '{pkg_name}' is listed under multiple sections: {', '.join(locations)}",

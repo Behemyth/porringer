@@ -87,7 +87,9 @@ asyncio.run(main())
 
 `SetupParameters` narrows the action plan with `plugin_names`, `action_kinds`, `include_packages`, `action_ids`, and `entry_ids`. For every filter, `None` selects everything and an empty set selects nothing. Filters compose as an intersection.
 
-`api.tool.check_updates`, `api.tool.upgrade_project`, and `api.tool.uninstall` accept `paths=` and only touch package, tool, and runtime actions. All three accept `action_ids` to target exact rows; IDs are `<manifest_index>:<action_index>` positions, so re-inspect after a manifest changes. They also accept `entry_ids`, which survive manifest edits and are the key to store for per-entry settings. `uninstall` requires `include_packages`, `action_ids` or `entry_ids`, removes tools before the packages and runtimes they may depend on, and skips packages that are not installed:
+`SetupParameters.groups` works the other way: it opts in to [optional groups](install.md#optional-groups), whose entries are left out of the plan by default. Naming a group that no loaded manifest declares raises `ValueError`. Each manifest's `SetupResults.metadata.groups` reports the groups it declares and whether each was selected, and actions from a group carry `SetupAction.group`.
+
+`api.tool.check_updates`, `api.tool.upgrade_project`, and `api.tool.uninstall` accept `paths=` and only touch package, tool, and runtime actions. All three accept `action_ids` to target exact rows; IDs are `<manifest_index>:<action_index>` positions, so re-inspect after a manifest changes. They also accept `entry_ids`, which survive manifest edits and are the key to store for per-entry settings, and `groups` to reach entries in optional groups. `uninstall` requires `include_packages`, `action_ids` or `entry_ids`, removes tools before the packages and runtimes they may depend on, and skips packages that are not installed:
 
 ```python
 report = await api.tool.uninstall(paths=Path('.'), include_packages={'ruff'})

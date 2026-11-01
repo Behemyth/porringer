@@ -5,6 +5,7 @@ Porringer CLI install command.
 
 import asyncio
 from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from pathlib import Path
 from typing import Annotated
 
@@ -22,12 +23,14 @@ from porringer.console.common import (
     StrategyOption,
     TargetArgument,
     TargetPlan,
+    WithOption,
     build_setup_parameters,
     classify_target,
     confirm_or_abort,
     create_api,
     global_manifest_or_exit,
     parse_shared_options,
+    reject_groups_for_profile,
     resolve_target_or_exit,
 )
 from porringer.console.schema import ConsoleConfiguration
@@ -44,6 +47,7 @@ class _InstallOptions:
     strategy: SyncStrategy = SyncStrategy.MINIMAL
     plugin_names: set[str] | None = None
     action_ids: set[str] | None = None
+    groups: set[str] = dataclass_field(default_factory=set)
     as_jsonl: bool = False
     record_path: Path | None = None
     yes: bool = False
@@ -68,6 +72,7 @@ def _run_manifest_install(
         plugin_names=options.plugin_names,
         action_ids=options.action_ids,
         fail_fast=options.fail_fast,
+        groups=options.groups,
     )
 
     # JSONL output must stay machine-clean, so the human preview is skipped there.
@@ -77,8 +82,12 @@ def _run_manifest_install(
         # setup_params carries. A confirmation prompt must show real
         # presence/update statuses, never FAST's unprobed placeholders.
         preview_params = setup_params.model_copy(update={'inspection_mode': InspectionMode.COMPLETE})
-        with configuration.output.status('Inspecting...'):
-            plan = asyncio.run(api.sync.plan(preview_params))
+        try:
+            with configuration.output.status('Inspecting...'):
+                plan = asyncio.run(api.sync.plan(preview_params))
+        except ValueError as exc:
+            configuration.output.error(str(exc))
+            raise typer.Exit(EXIT_FAILURE) from None
         _display_report(configuration, plan.report, compact=True)
 
     try:
@@ -101,6 +110,9 @@ def _run_manifest_install(
             execute_results = sync_command._execute_with_progress(configuration, api, setup_params, plan=plan)
     except PlanStaleError as exc:
         configuration.output.error(f'{exc.error}. Run the install again to review the changes.')
+        raise typer.Exit(EXIT_FAILURE) from None
+    except ValueError as exc:
+        configuration.output.error(str(exc))
         raise typer.Exit(EXIT_FAILURE) from None
 
     if execute_results.total_actions == 0:
@@ -170,6 +182,7 @@ def install_default(  # noqa: PLR0913
     strategy: StrategyOption = 'minimal',
     plugin: PluginOption = None,
     only_action: OnlyActionOption = None,
+    with_groups: WithOption = None,
     jsonl: Annotated[
         bool,
         typer.Option(
@@ -208,6 +221,7 @@ def install_default(  # noqa: PLR0913
         project_dir=project_dir,
         plugin=plugin,
         only_action=only_action,
+        with_groups=with_groups,
     )
     options = _InstallOptions(
         project_directory=shared.project_directory,
@@ -215,6 +229,7 @@ def install_default(  # noqa: PLR0913
         strategy=shared.strategy,
         plugin_names=shared.plugin_names,
         action_ids=shared.action_ids,
+        groups=shared.groups,
         as_jsonl=jsonl,
         record_path=record,
         yes=yes,
@@ -231,6 +246,7 @@ def install_default(  # noqa: PLR0913
     plan = classify_target(configuration, api, resolved_target)
 
     if plan.is_profile:
+        reject_groups_for_profile(configuration, options.groups)
         _run_profile_install(configuration, api, plan, options)
     else:
         _run_manifest_install(configuration, api, plan.manifest_paths, options)

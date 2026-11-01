@@ -29,6 +29,7 @@ Use complete mode for final diagnostics. Use fast mode for live refresh loops wh
 | `--mode` | Use `complete` or `fast` inspection. |
 | `--plugin` | Include only actions for selected plugin names. Repeatable. |
 | `--only-action` | Include only a stable action ID such as `0:2`. Repeatable. |
+| `--with` | Include an optional manifest group, such as `maintainer`. Repeatable. |
 | `--json` | Emit machine-readable JSON. |
 | `--envelope` | Emit a common result envelope as JSON. |
 | `--explain` | Render diagnostics and follow-up actions for humans. |
@@ -71,12 +72,14 @@ Each action includes:
 | `ref` | Stable identity with manifest index, action index, and action ID. |
 | `action_id` | Compact correlation key such as `0:3`. |
 | `status` | `needed`, `satisfied`, `update_available`, `unavailable`, `failed`, `skipped`, or `unknown`. |
-| `action` | JSON-stable action data such as kind, ecosystem, installer, package, and command. Actions from a manifest entry also carry `entry_id` (see below). |
+| `action` | JSON-stable action data such as kind, ecosystem, installer, package, and command. Actions from a manifest entry also carry `entry_id` (see below), and entries from an optional group carry `group`. |
 | `cli_command` | Native command preview when one can be rendered. |
 | `cli_steps` | Every command step that execution will run, in order. For a one-step action this contains `cli_command`; multi-step project tools can include setup steps before the final install command. |
 | `message` | Presence, update, skip, or error context. |
 
 The report `success` property is false when manifest loading fails, an action fails inspection, or an action is unavailable.
+
+Each manifest's `metadata.groups` lists the [optional groups](install.md#optional-groups) it declares, each with `name`, `description`, `selected`, and `entries` (the number of the group's entries that apply to this platform). Unselected groups contribute no actions.
 
 `action_id` is a position, so it changes when the manifest changes. `entry_id` identifies the manifest entry itself: it is derived from the manifest file, kind, ecosystem, package name, `installer` and `runtime`, so it stays the same when the constraint or description changes or entries are reordered. Actions Porringer adds on its own (bootstraps, inferred project installs) have no `entry_id`.
 

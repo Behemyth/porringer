@@ -10,8 +10,11 @@ The `porringer.json` manifest groups entries by kind and ecosystem. Porringer re
 | --- | --- | --- |
 | `packages.python` | `uv` or `pip` | `ruff`, `pyrefly`, `pytest`, `pytest-asyncio` |
 | `tools.python` | `pipx` | `pdm` |
+| `packages.system` (`maintainer` group) | `winget`, `brew`, or `apt` | GitHub CLI (`gh`), only with `--with maintainer` |
 
 These packages mirror the repository's own `lint` and `test` dependency groups in `pyproject.toml`. If you run preview from a matching development environment, the package actions should report as satisfied.
+
+The GitHub CLI entries belong to the optional `maintainer` group, so a plain install skips them and the preview lists the group as not included. Each entry pins the system installer for its platform. Porringer only installs `gh`; sign in afterwards with `gh auth login`.
 
 ## Usage
 
@@ -31,6 +34,12 @@ Skip confirmation in a scripted flow:
 
 ```shell
 porringer install examples/python-dev --yes
+```
+
+Include the optional maintainer tools:
+
+```shell
+porringer install examples/python-dev --with maintainer
 ```
 
 Upgrade every package to the latest allowed version:

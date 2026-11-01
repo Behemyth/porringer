@@ -6,6 +6,7 @@ Inspects a manifest or setup profile and reports the plan without executing anyt
 import asyncio
 import json
 from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -21,11 +22,13 @@ from porringer.console.common import (
     ProjectDirOption,
     StrategyOption,
     TargetArgument,
+    WithOption,
     build_setup_parameters,
     classify_target,
     create_api,
     global_manifest_or_exit,
     parse_shared_options,
+    reject_groups_for_profile,
     resolve_target_or_exit,
 )
 from porringer.console.schema import ConsoleConfiguration
@@ -51,6 +54,7 @@ class _PreviewOptions:
     project_directory: Path | None = None
     plugin_names: set[str] | None = None
     action_ids: set[str] | None = None
+    groups: set[str] = dataclass_field(default_factory=set)
     as_json: bool = False
     as_envelope: bool = False
     explain: bool = False
@@ -168,6 +172,21 @@ def _display_compact_actions(output: Any, actions: tuple[Any, ...]) -> None:
             output.print(f'  [status.update_available]↑[/status.update_available] {escape(message)}')
 
 
+def _display_groups(output: Any, manifest: Any) -> None:
+    """Render the manifest's optional groups and whether each is in the plan."""
+    groups = manifest.metadata.groups if manifest.metadata is not None else ()
+    for group in groups:
+        detail = f' — {escape(group.description)}' if group.description else ''
+        count = f'{group.entries} entr{"y" if group.entries == 1 else "ies"}'
+        if group.selected:
+            output.print(f'  [heading]Optional group[/heading] {escape(group.name)}: included ({count}){detail}')
+        else:
+            output.print(
+                f'  [muted]Optional group {escape(group.name)}: not included ({count}){detail}. '
+                f'Add --with {escape(group.name)} to include it.[/muted]'
+            )
+
+
 def _display_report(
     configuration: ConsoleConfiguration,
     report: SyncInspectionReport,
@@ -195,6 +214,8 @@ def _display_report(
             style = 'error' if diagnostic.severity == 'error' else 'warning'
             field = f'{diagnostic.field}: ' if diagnostic.field else ''
             output.print(f'  [{style}]{diagnostic.severity}[/{style}] {field}{diagnostic.message}')
+
+        _display_groups(output, manifest)
 
         if not manifest.actions:
             output.print('  [muted]No actions[/muted]')
@@ -301,6 +322,7 @@ def preview_default(  # noqa: PLR0913
         typer.Option('--explain', help='Explain diagnostics and available follow-up actions'),
     ] = False,
     only_action: OnlyActionOption = None,
+    with_groups: WithOption = None,
     global_: GlobalOption = False,
 ) -> None:
     """Preview what Porringer would do, without executing any actions."""
@@ -311,6 +333,7 @@ def preview_default(  # noqa: PLR0913
         project_dir=project_dir,
         plugin=plugin,
         only_action=only_action,
+        with_groups=with_groups,
     )
     options = _PreviewOptions(
         strategy=shared.strategy,
@@ -318,6 +341,7 @@ def preview_default(  # noqa: PLR0913
         project_directory=shared.project_directory,
         plugin_names=shared.plugin_names,
         action_ids=shared.action_ids,
+        groups=shared.groups,
         as_json=as_json,
         as_envelope=as_envelope,
         explain=explain,
@@ -334,6 +358,7 @@ def preview_default(  # noqa: PLR0913
         plan = classify_target(configuration, api, resolved_target)
 
         if plan.is_profile and plan.profile_url is not None:
+            reject_groups_for_profile(configuration, options.groups)
             preview_profile(
                 configuration,
                 plan.profile_url,
@@ -351,6 +376,7 @@ def preview_default(  # noqa: PLR0913
         action_ids=options.action_ids,
         inspection_mode=options.inspection_mode,
         fail_fast=False,
+        groups=options.groups,
     )
 
     try:

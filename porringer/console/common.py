@@ -224,6 +224,7 @@ def build_setup_parameters(
     action_ids: set[str] | None = None,
     inspection_mode: InspectionMode = InspectionMode.COMPLETE,
     fail_fast: bool = True,
+    groups: set[str] | None = None,
 ) -> SetupParameters:
     """Construct :class:`SetupParameters` shared by install and preview.
 
@@ -240,6 +241,7 @@ def build_setup_parameters(
         plugin_names=plugin_names,
         action_ids=action_ids,
         inspection_mode=inspection_mode,
+        groups=groups or set(),
     )
 
 
@@ -271,6 +273,13 @@ OnlyActionOption = Annotated[
     typer.Option(
         "--only-action",
         help="Run only these stable action ids, such as 0:2 (repeatable)",
+    ),
+]
+WithOption = Annotated[
+    list[str] | None,
+    typer.Option(
+        "--with",
+        help="Include this optional manifest group, such as maintainer (repeatable)",
     ),
 ]
 GlobalOption = Annotated[
@@ -307,6 +316,7 @@ class SharedOptions:
     project_directory: Path | None
     plugin_names: set[str] | None
     action_ids: set[str] | None
+    groups: set[str]
 
 
 def parse_shared_options(
@@ -316,6 +326,7 @@ def parse_shared_options(
     project_dir: Path | None,
     plugin: list[str] | None,
     only_action: list[str] | None,
+    with_groups: list[str] | None = None,
 ) -> SharedOptions:
     """Parse the CLI options shared by install and preview into typed values."""
     return SharedOptions(
@@ -323,4 +334,12 @@ def parse_shared_options(
         project_directory=project_dir.resolve() if project_dir else None,
         plugin_names=set(plugin) if plugin else None,
         action_ids=set(only_action) if only_action else None,
+        groups=set(with_groups or ()),
     )
+
+
+def reject_groups_for_profile(configuration: ConsoleConfiguration, groups: set[str]) -> None:
+    """Exit when optional groups are requested for a setup profile, which doesn't support them."""
+    if groups:
+        configuration.output.error("--with applies to manifests, not setup profiles or install links")
+        raise typer.Exit(EXIT_FAILURE)

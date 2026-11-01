@@ -38,6 +38,7 @@ Only its declared entries become actions, plus any installer they need first (fo
 | `runtimes` | object | Language runtimes per ecosystem, such as `{ "python": ["3.14"] }`. |
 | `scm` | object | Source repositories to clone or update, such as `{ "git": ["https://github.com/org/repo"] }`. |
 | `preferences` | object | Optional installer preference per ecosystem, such as `{ "python": "uv" }`. |
+| `groups` | object | Optional entry groups that callers opt into, such as `{ "maintainer": { "description": "Release tools" } }`. See [Optional Groups](#optional-groups). |
 | `name` | string | Optional display name. |
 | `description` | string | Optional short description. |
 | `author` | string | Optional author or organization name. |
@@ -88,6 +89,7 @@ An entry is either a string (`"pdm>=2"`) or an object:
 | `include_prereleases` | Consider pre-releases when checking for updates. |
 | `installer` | Installer plugin for this entry only, such as `"pipx"`. It must install that kind for the entry's ecosystem, otherwise the manifest is rejected. It overrides `preferences` and is never swapped for another installer; if it isn't installed yet, its prerequisite is installed first (for example `pip` for `pipx`). |
 | `runtime` | Runtime tag the installer runs under, such as `"3.14"`. Packages and tools only. If the tag doesn't resolve on this machine, that entry fails. Command previews still show the default interpreter. |
+| `group` | Optional group the entry belongs to. The group must be declared under `groups`. The entry is installed only when the group is selected with `--with`. |
 
 ```json
 {
@@ -98,6 +100,34 @@ An entry is either a string (`"pdm>=2"`) or an object:
   }
 }
 ```
+
+## Optional Groups
+
+Use groups for tools that only some people need, such as maintainer or release tools. Declare each group under `groups`, then add `group` to its entries. A plain install skips them, and the preview lists each group with whether it's included and how many of its entries apply to this platform.
+
+```json
+{
+  "groups": {
+    "maintainer": { "description": "Repository administration and release tools" }
+  },
+  "packages": {
+    "system": [
+      { "name": "GitHub.cli", "installer": "winget", "platforms": ["win32"], "group": "maintainer" },
+      { "name": "gh", "installer": "brew", "platforms": ["darwin"], "group": "maintainer" },
+      { "name": "gh", "installer": "apt", "platforms": ["linux"], "group": "maintainer" }
+    ]
+  }
+}
+```
+
+```shell
+porringer preview --with maintainer
+porringer install --with maintainer
+```
+
+Group names use lowercase letters, digits, and hyphens. When an entry names a group that isn't declared, the manifest is rejected. When you pass `--with` with a group that no loaded manifest declares, the command fails. Once selected, a group's entries are planned, confirmed, and reported like any other entry, and each action records its `group`. Setup profiles and install links don't accept `--with`.
+
+Porringer installs tools; it doesn't sign you in to them. After installing the GitHub CLI, run `gh auth login`.
 
 ## Inference
 
@@ -143,6 +173,7 @@ porringer install ./my-project --only-action 0:2
 | `--strategy`, `-s` | Use `minimal`, `latest`, or `exact` resolution. |
 | `--plugin` | Include only actions for selected plugin names. Repeatable. |
 | `--only-action` | Run only a stable action ID such as `0:2`. Repeatable. |
+| `--with` | Include an optional manifest group, such as `maintainer`. Repeatable. |
 | `--jsonl` | Emit progress events and the final result as newline-delimited JSON. |
 | `--record` | Write a replayable JSON run record to the given path. |
 | `--yes`, `-y` | Skip the confirmation prompt. |

@@ -30,6 +30,7 @@ from porringer.schema import (
     InspectionSummary,
     ManifestDiagnostic,
     ManifestDiagnosticSnapshot,
+    ManifestGroupSnapshot,
     ManifestInspection,
     ManifestMetadata,
     ManifestMetadataSnapshot,
@@ -72,6 +73,7 @@ def action_snapshot(action: SetupAction, index: int, *, ref: ActionRef | None = 
         include_prereleases=action.include_prereleases,
         runtime_tag=action.runtime_tag,
         entry_id=action.entry_id,
+        group=action.group,
     )
 
 
@@ -105,6 +107,15 @@ def metadata_snapshot(
         description=metadata.description,
         author=metadata.author,
         url=metadata.url,
+        groups=tuple(
+            ManifestGroupSnapshot(
+                name=group.name,
+                description=group.description,
+                selected=group.selected,
+                entries=group.entries,
+            )
+            for group in metadata.groups
+        ),
     )
 
 

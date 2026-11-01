@@ -183,6 +183,8 @@ class SetupAction:
         runtime_tag: Runtime the installer runs under, from the entry's ``runtime``.
         entry_id: Stable identity of the manifest entry this action came from;
             ``None`` for actions Porringer synthesized.
+        group: Optional manifest group the entry belongs to; ``None`` for
+            required entries and synthesized actions.
     """
 
     description: str
@@ -194,6 +196,7 @@ class SetupAction:
     include_prereleases: bool = False
     runtime_tag: str | None = None
     entry_id: str | None = None
+    group: str | None = None
 
 
 @dataclass(slots=True)
@@ -349,6 +352,14 @@ class SetupParameters(PorringerModel):
         description=(
             'Action kinds to include.  ``None`` means all kinds; an empty set '
             'matches no actions.  Actions without a kind are excluded when set.'
+        ),
+    )
+    groups: set[str] = Field(
+        default_factory=set,
+        description=(
+            'Optional manifest groups to include.  Entries that name a group '
+            'are left out of the plan unless the group is listed here.  A name '
+            'that no loaded manifest declares is an error.'
         ),
     )
 

@@ -20,7 +20,7 @@ import inspect as inspectlib
 import logging
 import shutil
 import tempfile
-from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Generator, Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Collection, Generator, Sequence
 from contextvars import ContextVar
 from dataclasses import replace
 from pathlib import Path
@@ -102,6 +102,24 @@ def _action_indices(preview: SetupResults) -> list[int]:
     if len(preview.action_indices) != len(preview.actions):
         preview.action_indices = list(range(len(preview.actions)))
     return preview.action_indices
+
+
+def _check_requested_groups(
+    requested: Collection[str],
+    previews: Sequence[SetupResults],
+    failed_paths: Sequence[tuple[int, Path, str]],
+) -> None:
+    """Reject requested groups that no loaded manifest declares.
+
+    Skipped when a manifest failed to load, since it may have declared them.
+    """
+    if not requested or failed_paths:
+        return
+    declared = {group.name for preview in previews if preview.metadata for group in preview.metadata.groups}
+    unknown = sorted(set(requested) - declared)
+    if unknown:
+        available = ', '.join(sorted(declared)) or 'none'
+        raise ValueError(f'Unknown optional group(s): {", ".join(unknown)} (available: {available})')
 
 
 def _inspection_needs_runtime(previews: Sequence[SetupResults], plugins: DiscoveredPlugins) -> bool:
@@ -345,6 +363,7 @@ class SyncCommands:
                     strategy=parameters.strategy,
                     plugins=plugins,
                     infer=not self._is_standalone(path),
+                    groups=parameters.groups,
                 )
             except ManifestError as e:
                 logger.warning(f'Failed to load manifest at {path}: {e.error}')
@@ -358,6 +377,7 @@ class SyncCommands:
 
             previews.append(preview)
 
+        _check_requested_groups(parameters.groups, previews, failed_paths)
         return previews, failed_paths
 
     @staticmethod

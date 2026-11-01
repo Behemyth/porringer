@@ -9,6 +9,7 @@ loads a manifest and returns a `SetupResults` without executing.
 
 import logging
 import tomllib
+from collections.abc import Collection
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -20,6 +21,7 @@ from porringer.core.plugin_schema.environment import Environment, PackageParamet
 from porringer.core.plugin_schema.project_environment import ProjectInstaller
 from porringer.core.schema import Ecosystem, PackageRef, PluginKind
 from porringer.schema import (
+    ManifestGroupInfo,
     ManifestMetadata,
     PackageSpec,
     SetupAction,
@@ -298,6 +300,7 @@ def _emit_section_actions(
                 include_prereleases=kind != PluginKind.SCM and package.include_prereleases,
                 runtime_tag=package.runtime if kind != PluginKind.SCM else None,
                 entry_id=entry_id(manifest_path, kind, ecosystem, package),
+                group=package.group,
             )
         )
 
@@ -995,6 +998,19 @@ def build_actions(
     return actions
 
 
+def _group_infos(manifest: SetupManifest, selected: Collection[str]) -> tuple[ManifestGroupInfo, ...]:
+    """Describe the optional groups *manifest* declares and which of them are *selected*."""
+    return tuple(
+        ManifestGroupInfo(
+            name=name,
+            description=group.description,
+            selected=name in selected,
+            entries=len(manifest.group_entries(name)),
+        )
+        for name, group in manifest.groups.items()
+    )
+
+
 def _build_preview(
     path: Path,
     strategy: SyncStrategy,
@@ -1003,6 +1019,7 @@ def _build_preview(
     log_label: str,
     plugins: DiscoveredPlugins | None = None,
     infer: bool = True,
+    groups: Collection[str] = (),
 ) -> SetupResults:
     """Shared implementation for :func:`parse_manifest` and :func:`load_manifest`.
 
@@ -1019,6 +1036,7 @@ def _build_preview(
         plugins: Pre-discovered plugins.  When provided, plugin
             discovery is skipped entirely.
         infer: Whether to infer actions from the surrounding project.
+        groups: Optional manifest groups whose entries are included.
 
     Returns:
         SetupResults containing the action plan.
@@ -1031,7 +1049,7 @@ def _build_preview(
     result = find_manifest(path)
     resolved_plugins = plugins if plugins is not None else discover_all_plugins(use_cache=use_cache)
     actions = build_actions(
-        result.manifest,
+        result.manifest.select_groups(groups),
         resolved_plugins,
         strategy,
         search_from=result.root_directory,
@@ -1043,6 +1061,7 @@ def _build_preview(
         description=result.manifest.description,
         author=result.manifest.author,
         url=str(result.manifest.url) if result.manifest.url else None,
+        groups=_group_infos(result.manifest, groups),
     )
 
     return SetupResults(
@@ -1089,6 +1108,7 @@ def load_manifest(
     *,
     plugins: DiscoveredPlugins | None = None,
     infer: bool = True,
+    groups: Collection[str] = (),
 ) -> SetupResults:
     """Load a manifest using cached plugin knowledge.
 
@@ -1109,6 +1129,7 @@ def load_manifest(
         plugins: Pre-discovered plugins. ``None`` uses cached
             discovery internally.
         infer: Whether to infer actions from the surrounding project.
+        groups: Optional manifest groups whose entries are included.
 
     Returns:
         SetupResults containing the action plan.  Actions with
@@ -1124,4 +1145,5 @@ def load_manifest(
         log_label='Loading manifest (fast)',
         plugins=plugins,
         infer=infer,
+        groups=groups,
     )
