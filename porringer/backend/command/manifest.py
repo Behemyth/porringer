@@ -29,12 +29,14 @@ from packaging.utils import canonicalize_name
 from pydantic import ValidationError
 
 from porringer.backend.backend import BackendResolver
+from porringer.core.plugin_schema.environment import Environment
 from porringer.core.plugin_schema.manifest import ManifestContributor
-from porringer.core.schema import ManifestContribution, Plugin, PluginKind
+from porringer.core.schema import Ecosystem, ManifestContribution, PackageRef, Plugin, PluginKind
 from porringer.schema import (
     ManifestDiagnostic,
     ManifestDiagnosticSeverity,
     ManifestValidationResult,
+    PackageSpec,
     SetupManifest,
 )
 from porringer.schema.manifest import (
@@ -497,7 +499,7 @@ def validate_manifest(path: Path) -> ManifestValidationResult:
     }
     resolver = BackendResolver(all_plugins, manifest.preferences)
 
-    _validate_backends(manifest, resolver, _error, _warning)
+    _validate_backends(manifest, resolver, _error, _warning, all_plugins)
     _validate_package_names(manifest, resolver, _warning)
     _validate_duplicate_packages(manifest, _warning)
 
@@ -564,6 +566,7 @@ def _validate_backends(
     resolver: BackendResolver,
     error_callback: Callable[[str, str, ManifestValidationCode], None],
     warning_callback: Callable[[str, str, ManifestValidationCode], None] | None = None,
+    plugins: dict[str, Plugin] | None = None,
 ) -> None:
     """Validate that each (kind, ecosystem) in the manifest resolves to a plugin.
 
@@ -587,19 +590,60 @@ def _validate_backends(
                 )
         installer = resolver.resolve(kind, ecosystem)
         if installer is None:
-            if kind in _DEFERRABLE_KINDS and warning_callback is not None:
+            bootstrap_package = (
+                _bootstrap_package_before_tool_phase(manifest, kind, ecosystem, packages, resolver, plugins or {})
+                if kind in _DEFERRABLE_KINDS
+                else None
+            )
+            if bootstrap_package is not None and warning_callback is not None:
                 warning_callback(
                     f'{kind.value}.{ecosystem}',
                     f"No installer currently available for ({kind.value}, '{ecosystem}'); "
-                    'may be resolved after an earlier phase installs the prerequisite',
+                    f"the earlier package phase can schedule a bootstrap for prerequisite '{bootstrap_package}', "
+                    'but its installer may itself be deferred',
                     ManifestValidationCode.UNKNOWN_PLUGIN,
                 )
             else:
                 error_callback(
                     f'{kind.value}.{ecosystem}',
-                    f"No available installer for ({kind.value}, '{ecosystem}')",
+                    f"No available installer for ({kind.value}, '{ecosystem}')"
+                    + ('; no earlier prerequisite action can provide one' if kind in _DEFERRABLE_KINDS else ''),
                     ManifestValidationCode.UNKNOWN_PLUGIN,
                 )
+
+
+def _bootstrap_package_before_tool_phase(
+    manifest: SetupManifest,
+    kind: PluginKind,
+    ecosystem: Ecosystem,
+    packages: list[PackageSpec],
+    resolver: BackendResolver,
+    plugins: dict[str, Plugin],
+) -> PackageRef | None:
+    """Return a registered package bootstrap that an earlier phase can schedule."""
+    if kind != PluginKind.TOOL:
+        return None
+
+    candidates = resolver.registered_names(kind, ecosystem)
+    preference = manifest.preferences.get(ecosystem)
+    for package in packages:
+        names = [package.installer] if package.installer is not None else candidates
+        if package.installer is None and preference is not None and preference in candidates:
+            names = [preference]
+
+        for name in names:
+            plugin = plugins.get(name)
+            if not isinstance(plugin, Environment):
+                continue
+            requirement = type(plugin).bootstrap_requirement()
+            if (
+                requirement is not None
+                and requirement.kind == PluginKind.PACKAGE
+                and resolver.is_registered(requirement.kind, ecosystem)
+            ):
+                return requirement.package
+
+    return None
 
 
 def _validate_package_names(

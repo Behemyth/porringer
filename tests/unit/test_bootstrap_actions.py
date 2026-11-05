@@ -10,6 +10,8 @@ from typing import override
 from packaging.version import Version
 
 from porringer.backend.command.core.action_builder import build_actions
+from porringer.backend.command.core.discovery import DiscoveredPlugins
+from porringer.backend.command.manifest import validate_manifest
 from porringer.core.plugin_schema.environment import BootstrapRequirement, CheckUpdatesParameters, Environment
 from porringer.core.plugin_schema.runtime import RuntimeContext
 from porringer.core.schema import (
@@ -21,6 +23,7 @@ from porringer.core.schema import (
     PluginParameters,
 )
 from porringer.schema import SetupManifest
+from porringer.schema.manifest import ManifestDiagnosticSeverity
 
 _PARAMS = PluginParameters(distribution=Distribution(version=Version('0.0.0')))
 _PY = Ecosystem('python')
@@ -207,3 +210,60 @@ class TestBootstrapSynthesis:
         actions = build_actions(manifest, environments)
 
         assert all(a.kind != PluginKind.PACKAGE for a in actions)
+
+    @staticmethod
+    def test_validation_reports_a_valid_earlier_bootstrap(tmp_path: Path, monkeypatch) -> None:
+        """A missing tool installer is only a warning when its prerequisite can run first."""
+        (tmp_path / 'porringer.json').write_text('{"tools":{"python":[{"name":"pdm","installer":"pipx"}]}}')
+        plugins = DiscoveredPlugins(
+            environments={'pipx': _make_pipx(available=False), 'pip': _make_pip(available=True)},
+            project_environments={},
+            scm_environments={},
+        )
+        monkeypatch.setattr('porringer.backend.command.manifest.discover_all_plugins', lambda **_: plugins)
+
+        result = validate_manifest(tmp_path)
+
+        diagnostics = [item for item in result.diagnostics if item.field == 'tools.python']
+        assert result.valid is True
+        assert len(diagnostics) == 1
+        assert diagnostics[0].severity == ManifestDiagnosticSeverity.WARNING
+        assert "earlier package phase can schedule a bootstrap for prerequisite 'pipx'" in diagnostics[0].message
+
+    @staticmethod
+    def test_validation_notes_deferred_bootstrap_installer(tmp_path: Path, monkeypatch) -> None:
+        """A registered but unavailable package installer remains explicitly deferred."""
+        (tmp_path / 'porringer.json').write_text('{"tools":{"python":[{"name":"pdm","installer":"pipx"}]}}')
+        plugins = DiscoveredPlugins(
+            environments={'pipx': _make_pipx(available=False), 'pip': _make_pip(available=False)},
+            project_environments={},
+            scm_environments={},
+        )
+        monkeypatch.setattr('porringer.backend.command.manifest.discover_all_plugins', lambda **_: plugins)
+
+        result = validate_manifest(tmp_path)
+
+        diagnostics = [item for item in result.diagnostics if item.field == 'tools.python']
+        assert result.valid is True
+        assert len(diagnostics) == 1
+        assert diagnostics[0].severity == ManifestDiagnosticSeverity.WARNING
+        assert 'its installer may itself be deferred' in diagnostics[0].message
+
+    @staticmethod
+    def test_validation_errors_when_no_bootstrap_installer_is_registered(tmp_path: Path, monkeypatch) -> None:
+        """An unavailable tool without a registered package bootstrap is a real validation error."""
+        (tmp_path / 'porringer.json').write_text('{"tools":{"python":[{"name":"pdm","installer":"pipx"}]}}')
+        plugins = DiscoveredPlugins(
+            environments={'pipx': _make_pipx(available=False)},
+            project_environments={},
+            scm_environments={},
+        )
+        monkeypatch.setattr('porringer.backend.command.manifest.discover_all_plugins', lambda **_: plugins)
+
+        result = validate_manifest(tmp_path)
+
+        diagnostics = [item for item in result.diagnostics if item.field == 'tools.python']
+        assert result.valid is False
+        assert len(diagnostics) == 1
+        assert diagnostics[0].severity == ManifestDiagnosticSeverity.ERROR
+        assert 'no earlier prerequisite action can provide one' in diagnostics[0].message
