@@ -174,6 +174,12 @@ class SetupManifest(PorringerModel):
         description='Optional entry groups. Entries that name a group are skipped unless the group is selected '
         '(e.g. {"maintainer": {"description": "Release tools"}})',
     )
+    native: dict[str, Any] | None = Field(
+        default=None,
+        description="CPPython local-source intent, passed after the Python project sync to the project's own "
+        '`cppython local apply`. Porringer does not interpret it, except that a relative `root` resolves '
+        "against the manifest's directory",
+    )
 
     @model_validator(mode='before')
     @classmethod

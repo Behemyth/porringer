@@ -7,10 +7,13 @@ resolved plugins.  Also contains the preview/parse entry point that
 loads a manifest and returns a `SetupResults` without executing.
 """
 
+import json
 import logging
 import tomllib
 from collections.abc import Collection
+from dataclasses import replace
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlsplit
 
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
@@ -18,7 +21,11 @@ from packaging.version import InvalidVersion, Version
 
 from porringer.backend.backend import BackendResolver
 from porringer.core.plugin_schema.environment import Environment, PackageParameters
-from porringer.core.plugin_schema.project_environment import ProjectInstaller
+from porringer.core.plugin_schema.project_environment import (
+    NativeHandoffUnsupportedError,
+    ProjectInstaller,
+    project_steps,
+)
 from porringer.core.schema import Ecosystem, PackageRef, PluginKind
 from porringer.schema import (
     ManifestGroupInfo,
@@ -191,8 +198,14 @@ def get_cli_steps(
                 # search_from only affects ProjectCommandPlan.directory (project
                 # root auto-discovery), never the steps we read here, so a
                 # placeholder path is fine for command display purposes.
-                plan = proj_envs[action.installer].command_plan(Path('.'), runtime_context=runtime_context)
-                return tuple(tuple(step) for step in plan.steps)
+                installer = proj_envs[action.installer]
+                plan = installer.command_plan(Path('.'), runtime_context=runtime_context)
+                try:
+                    steps = project_steps(type(installer), plan, action.native_intent)
+                except NativeHandoffUnsupportedError:
+                    # Execution reports this as the action's failure; show what would run before it.
+                    steps = project_steps(type(installer), plan, None)
+                return tuple(tuple(step) for step in steps)
         case PluginKind.SCM:
             scm_envs = scm_environments or {}
             if action.installer and action.package and action.installer in scm_envs:
@@ -883,6 +896,34 @@ def _compute_needed_pairs(
     return needed_pairs
 
 
+def native_intent_json(native: dict[str, Any], base_directory: Path) -> str:
+    """Serialize a manifest's ``native`` section for the handoff, resolving a relative ``root``.
+
+    CPPython would resolve a relative root against the project directory the step runs in,
+    which differs from the manifest's directory when the manifest lives elsewhere.
+    """
+    intent = dict(native)
+    root = intent.get('root')
+    if isinstance(root, str):
+        intent['root'] = str((base_directory / Path(root).expanduser()).resolve())
+    return json.dumps(intent, sort_keys=True, separators=(',', ':'))
+
+
+def _attach_native_intent(actions: list[SetupAction], native: dict[str, Any], search_from: Path) -> None:
+    """Hand the manifest's ``native`` section to the Python project sync action."""
+    intent = native_intent_json(native, search_from)
+    attached = False
+    for index, action in enumerate(actions):
+        if action.kind == PluginKind.PROJECT and action.ecosystem == _PYTHON_ECOSYSTEM:
+            actions[index] = replace(action, native_intent=intent)
+            attached = True
+    if not attached:
+        logger.warning(
+            "The manifest's 'native' section was ignored because no Python project sync is planned for %s",
+            search_from,
+        )
+
+
 def build_actions(
     manifest: SetupManifest,
     plugins: DiscoveredPlugins | dict[str, Environment],
@@ -968,6 +1009,9 @@ def build_actions(
     )
     if implicit_project_actions:
         actions.extend(implicit_project_actions)
+
+    if manifest.native is not None:
+        _attach_native_intent(actions, manifest.native, search_from)
 
     bootstrap_actions = _build_bootstrap_actions(actions, plugins, resolver, dict(manifest.preferences), verb)
     if bootstrap_actions:

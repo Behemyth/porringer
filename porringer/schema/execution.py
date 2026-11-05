@@ -185,6 +185,8 @@ class SetupAction:
             ``None`` for actions Porringer synthesized.
         group: Optional manifest group the entry belongs to; ``None`` for
             required entries and synthesized actions.
+        native_intent: For a Python PROJECT action, the manifest's ``native``
+            section as canonical JSON, handed to CPPython after the sync.
     """
 
     description: str
@@ -197,6 +199,7 @@ class SetupAction:
     runtime_tag: str | None = None
     entry_id: str | None = None
     group: str | None = None
+    native_intent: str | None = None
 
 
 @dataclass(slots=True)

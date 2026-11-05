@@ -44,6 +44,12 @@ class PoetryEnvironment(ProjectEnvironment):
 
     @classmethod
     @override
+    def run_prefix(cls) -> list[str]:
+        """`poetry run` runs commands in the project environment."""
+        return ['poetry', 'run']
+
+    @classmethod
+    @override
     def command_plan(cls, search_from, *, runtime_context: RuntimeContext | None = None) -> ProjectCommandPlan:
         """Build Poetry's sync plan, including runtime selection when needed."""
         directory = cls.resolve_project_root(search_from) or search_from

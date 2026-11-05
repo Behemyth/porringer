@@ -141,6 +141,15 @@ class ProjectInstaller(ToolBasedPlugin, RuntimeConsumer, ManifestContributor):
         return ECOSYSTEM_CONTRIBUTIONS.get(cls.ecosystem())
 
     @classmethod
+    def run_prefix(cls) -> list[str] | None:
+        """Return the argv prefix that runs a command inside the synced project environment.
+
+        Used for the native handoff, which runs the project's own locked
+        CPPython after sync. ``None`` (the default) means the tool can't.
+        """
+        return None
+
+    @classmethod
     def project_marker(cls) -> str | None:
         """Return the filename that marks this ecosystem's project root.
 
@@ -333,6 +342,43 @@ class NodeProjectInstaller(ProjectInstaller):
     def consumed_runtime_kind(cls) -> str:
         """Node project installers consume a Node runtime."""
         return 'node'
+
+
+NATIVE_APPLY_COMMAND = ('cppython', 'local', 'apply')
+"""The CPPython command that receives a manifest's ``native`` intent."""
+
+
+class NativeHandoffUnsupportedError(ValueError):
+    """The project installer has no way to run a command inside the project environment."""
+
+
+def native_apply_step(installer: type[ProjectInstaller], native_intent: str) -> list[str]:
+    """Return the step that hands a manifest's ``native`` intent to the project's own CPPython.
+
+    The intent is passed inline as JSON, so preview and execution show the same command
+    and nothing is written before the user confirms. ``--clone`` lets CPPython fetch
+    missing checkouts of local packages from the URLs in the intent.
+
+    Raises:
+        NativeHandoffUnsupportedError: If *installer* has no run prefix.
+    """
+    prefix = installer.run_prefix()
+    if prefix is None:
+        raise NativeHandoffUnsupportedError(
+            f"'{installer.tool_name()}' can't run commands in the project environment, "
+            "so the manifest's 'native' section can't be applied"
+        )
+    return [*prefix, *NATIVE_APPLY_COMMAND, '--clone', '--inline', native_intent, '--json']
+
+
+def project_steps(
+    installer: type[ProjectInstaller], plan: ProjectCommandPlan, native_intent: str | None
+) -> list[list[str]]:
+    """Return the steps to run for *plan*, followed by the native handoff when there is an intent."""
+    steps = plan.steps or ([plan.argv] if plan.argv else [])
+    if native_intent is None:
+        return steps
+    return [*steps, native_apply_step(installer, native_intent)]
 
 
 def _has_nested_key(data: object, path: Sequence[str]) -> bool:

@@ -26,6 +26,7 @@ from porringer.core.path import ensure_system_path, reset_sync_state
 from porringer.core.plugin_schema.environment import Environment, PackageParameters
 from porringer.core.plugin_schema.project_environment import (
     ProjectInstaller,
+    project_steps,
 )
 from porringer.core.plugin_schema.runtime import RuntimeContext, RuntimeProvider
 from porringer.core.plugin_schema.scm import CloneParameters, ScmEnvironment
@@ -1712,7 +1713,7 @@ async def _run_project_install_steps(
     # run them via run_command for line-by-line progress.
     plan = type(proj_env).command_plan(effective_dir, runtime_context=runtime_context)
     effective_dir = plan.directory
-    steps = plan.steps or ([plan.argv] if plan.argv else [])
+    steps = project_steps(type(proj_env), plan, action.native_intent)
 
     success = True
     returncode: int | None = None

@@ -36,3 +36,9 @@ class PDMEnvironment(ProjectEnvironment):
     def tool_name(cls) -> str:
         """PDM wraps the `pdm` CLI."""
         return 'pdm'
+
+    @classmethod
+    @override
+    def run_prefix(cls) -> list[str]:
+        """`pdm run` runs commands in the project environment."""
+        return ['pdm', 'run']

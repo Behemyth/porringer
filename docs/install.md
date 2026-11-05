@@ -39,6 +39,7 @@ Only its declared entries become actions, plus any installer they need first (fo
 | `scm` | object | Source repositories to clone or update, such as `{ "git": ["https://github.com/org/repo"] }`. |
 | `preferences` | object | Optional installer preference per ecosystem, such as `{ "python": "uv" }`. |
 | `groups` | object | Optional entry groups that callers opt into, such as `{ "maintainer": { "description": "Release tools" } }`. See [Optional Groups](#optional-groups). |
+| `native` | object | Optional CPPython local-source intent, applied after the Python project sync. See [Native Local Sources](#native-local-sources). |
 | `name` | string | Optional display name. |
 | `description` | string | Optional short description. |
 | `author` | string | Optional author or organization name. |
@@ -129,6 +130,34 @@ Group names use lowercase letters, digits, and hyphens. When an entry names a gr
 
 Porringer installs tools; it doesn't sign you in to them. After installing the GitHub CLI, run `gh auth login`.
 
+## Native Local Sources
+
+A C++ project that uses [CPPython](https://github.com/Synodic-Software/CPPython) can choose which of its native dependencies build from local checkouts instead of published packages. Put that choice in a `native` section, and Porringer passes it to the project's own CPPython after the Python project sync:
+
+```json
+{
+  "native": {
+    "schema_version": 1,
+    "root": "..",
+    "default": "local",
+    "packages": { "periapsis": {}, "honesty": {} }
+  }
+}
+```
+
+The project sync gets one more step, which runs the project's locked CPPython through the project tool:
+
+```shell
+pdm run cppython local apply --clone --inline '{"default":"local",...}' --json
+```
+
+- CPPython clones each local package whose checkout is missing from the root, from the package's `url`. A missing checkout without a `url` fails the step before the selection changes.
+- CPPython owns the format. Porringer doesn't validate the section beyond requiring an object; CPPython validates the whole document before it changes anything. Run `cppython local schema intent` for the schema.
+- A relative `root` resolves against the manifest's directory, and Porringer passes it to CPPython as an absolute path.
+- The selection is stored per user, not in the project. Applying a document merges it into the current selection, so running the install again changes nothing.
+- The step runs only with a Python project sync (PDM, Poetry, or uv). If no Python project sync is planned, Porringer logs a warning and ignores the section.
+- Without a `native` section, Porringer leaves the selection alone.
+
 ## Inference
 
 Several manifest sections are optional because Porringer infers them from repository metadata and conventions. An explicit manifest entry always overrides the inferred value.
@@ -141,6 +170,8 @@ Several manifest sections are optional because Porringer infers them from reposi
 | Runtime version | `requires-python` in an already-local `pyproject.toml` | Only applies once the project exists on disk; a manifest that clones the project first should still declare `runtimes` explicitly. |
 
 Preview always shows the full inferred plan, including any synthesized steps, so the manifest stays terse while the plan output stays transparent.
+
+When a tool installer is unavailable during validation, Porringer reports a warning if an earlier package phase can schedule a registered bootstrap for its prerequisite. That package installer may itself be deferred; if no bootstrap action can be planned, validation reports an error.
 
 ## Sync Strategies
 

@@ -57,6 +57,12 @@ class UvEnvironment(PythonEnvironment, ProjectInstaller):
 
     @classmethod
     @override
+    def run_prefix(cls) -> list[str]:
+        """`uv run --no-sync` runs commands in the environment the sync step just prepared."""
+        return ['uv', 'run', '--no-sync']
+
+    @classmethod
+    @override
     def standalone_binary(cls) -> bool:
         """UV is a standalone Rust binary, not a Python module."""
         return True
