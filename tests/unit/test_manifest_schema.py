@@ -168,6 +168,15 @@ class TestManifestSchema:
         assert 'preferences' in props
 
     @staticmethod
+    def test_project_preparation_schema_requires_true() -> None:
+        """The published schema describes the same preparation request accepted at runtime."""
+        schema = SyncCommands.manifest_schema()
+        prepare = schema['$defs']['ProjectPrepare']['properties']['prepare']
+
+        assert prepare['type'] == 'boolean'
+        assert prepare['const'] is True
+
+    @staticmethod
     def test_manifest_schema_has_root_meta_fields() -> None:
         """Exported schema contains $schema and $id root meta-fields."""
         schema = SyncCommands.manifest_schema()

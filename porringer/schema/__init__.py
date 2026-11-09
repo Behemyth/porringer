@@ -65,6 +65,7 @@ from porringer.schema.manifest import (
     ManifestMetadata,
     ManifestValidationResult,
     PackageSpec,
+    ProjectPrepare,
     SetupManifest,
     entry_id,
 )
@@ -186,6 +187,7 @@ __all__ = [
     'PackageUpdateInfo',
     'PluginCapability',
     'PluginInfo',
+    'ProjectPrepare',
     'PluginsDiscoveredEvent',
     'ProgressCallback',
     'ProgressEvent',

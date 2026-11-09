@@ -187,6 +187,9 @@ class SetupAction:
             required entries and synthesized actions.
         native_intent: For a Python PROJECT action, the manifest's ``native``
             section as canonical JSON, handed to CPPython after the sync.
+        native_command: The installer-provided native handoff command, fixed during planning.
+        prepare_command: The installer-provided project preparation command, fixed during planning.
+        project_installer_hint: Intended project installer when selection is deferred until after bootstrap.
     """
 
     description: str
@@ -200,6 +203,9 @@ class SetupAction:
     entry_id: str | None = None
     group: str | None = None
     native_intent: str | None = None
+    native_command: tuple[str, ...] | None = None
+    prepare_command: tuple[str, ...] | None = None
+    project_installer_hint: str | None = None
 
 
 @dataclass(slots=True)
@@ -222,6 +228,7 @@ class SetupActionResult:
             more than one command.
         failed_step_index: One-based command step that failed, when known.
         ref: Stable action reference, attached by ``sync.run``.
+        project_prepared: Whether the requested project preparation step completed successfully.
     """
 
     action: SetupAction
@@ -236,6 +243,7 @@ class SetupActionResult:
     cli_steps: tuple[tuple[str, ...], ...] | None = None
     failed_step_index: int | None = None
     ref: ActionRef | None = None
+    project_prepared: bool = False
 
 
 class SyncStrategy(Enum):
@@ -283,6 +291,15 @@ class SetupParameters(PorringerModel):
             'A Path overrides the working directory for all plugins, '
             'disabling per-ecosystem auto-discovery. '
             'False skips project-sync actions entirely.'
+        ),
+    )
+    project_timeout_seconds: float | None = Field(
+        default=None,
+        gt=0,
+        allow_inf_nan=False,
+        description=(
+            'Optional timeout in seconds for each project sync, native handoff, '
+            'or preparation command. None leaves project commands without a time limit.'
         ),
     )
     fail_fast: bool = Field(default=True, description='Stop on first error when processing multiple paths')

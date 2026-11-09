@@ -205,9 +205,11 @@ class TestProgressSnapshotRoundTrip:
         """SetupActionResultSnapshot survives a round-trip."""
         snapshot = SetupActionResultSnapshot(
             success=True,
+            project_prepared=True,
         )
         rt = _roundtrip(snapshot)
         assert rt.success is True
+        assert rt.project_prepared is True
 
     @staticmethod
     def test_progress_event_snapshot() -> None:

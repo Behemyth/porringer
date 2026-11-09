@@ -4,6 +4,7 @@ Tests for project_directory and SkipReason functionality.
 """
 
 import json
+import sys
 import tempfile
 from asyncio import Queue
 from pathlib import Path
@@ -11,6 +12,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from packaging.version import Version
+from pydantic import ValidationError
 
 from porringer.api import API
 from porringer.backend.command.core import execution
@@ -33,6 +35,13 @@ from porringer.utility.utility import CommandResult
 _SECOND_PROJECT_STEP = 2
 
 
+@pytest.mark.parametrize('timeout', [0, -1, float('inf'), float('nan')])
+def test_invalid_project_timeouts_are_rejected(timeout: float) -> None:
+    """A project timeout must be a positive finite duration."""
+    with pytest.raises(ValidationError):
+        SetupParameters(project_timeout_seconds=timeout)
+
+
 class _AvailableProjectEnvironment(MockProjectEnvironment):
     """Available project plugin for project-directory tests."""
 
@@ -51,6 +60,16 @@ class _MultiStepProjectEnvironment(_AvailableProjectEnvironment):
             argv=['mock-project', 'second'],
             steps=[['mock-project', 'first'], ['mock-project', 'second']],
         )
+
+
+class _SlowProjectEnvironment(_AvailableProjectEnvironment):
+    """Project plugin with a slow step followed by an observable second step."""
+
+    @classmethod
+    def command_plan(cls, search_from: Path, *, runtime_context=None) -> ProjectCommandPlan:
+        slow = [sys.executable, '-c', 'import time; time.sleep(10)']
+        later = [sys.executable, '-c', "from pathlib import Path; Path('later.txt').touch()"]
+        return ProjectCommandPlan(directory=search_from, argv=slow, steps=[slow, later])
 
 
 def _project_plugins() -> DiscoveredPlugins:
@@ -160,6 +179,61 @@ class TestProjectDirectorySkip:
                 ('mock-project', 'second'),
             )
             assert result.failed_step_index is None
+
+    @staticmethod
+    @pytest.mark.parametrize('limit', [None, 2.5])
+    async def test_project_timeout_is_forwarded_to_every_step(tmp_path: Path, limit: float | None) -> None:
+        """The default is unlimited, and a caller-supplied limit applies per command."""
+        (tmp_path / 'pyproject.toml').touch()
+        action = SetupAction(
+            description='Sync project via mock-project',
+            kind=PluginKind.PROJECT,
+            ecosystem=Ecosystem('python'),
+            installer='mock-project',
+        )
+        plugin = _MultiStepProjectEnvironment(PluginParameters(distribution=Distribution(version=Version('0.0.0'))))
+
+        with patch(
+            'porringer.backend.command.core.execution.run_command',
+            new_callable=AsyncMock,
+            return_value=CommandResult(returncode=0, stdout='', stderr=''),
+        ) as run:
+            result = await execution._execute_project_install(
+                action,
+                {'mock-project': plugin},
+                tmp_path,
+                SetupParameters(project_timeout_seconds=limit),
+                event_queue=Queue(),
+            )
+
+        assert result.success
+        assert len(run.await_args_list) == len(result.cli_steps or ())
+        assert all(call.kwargs['timeout_seconds'] == limit for call in run.await_args_list)
+
+    @staticmethod
+    async def test_timed_out_project_step_stops_later_steps(tmp_path: Path) -> None:
+        """A real subprocess timeout identifies the failed step and stops the plan."""
+        (tmp_path / 'pyproject.toml').touch()
+        action = SetupAction(
+            description='Sync project via mock-project',
+            kind=PluginKind.PROJECT,
+            ecosystem=Ecosystem('python'),
+            installer='mock-project',
+        )
+        plugin = _SlowProjectEnvironment(PluginParameters(distribution=Distribution(version=Version('0.0.0'))))
+
+        result = await execution._execute_project_install(
+            action,
+            {'mock-project': plugin},
+            tmp_path,
+            SetupParameters(project_timeout_seconds=0.25),
+            event_queue=Queue(),
+        )
+
+        assert not result.success
+        assert result.failed_step_index == 1
+        assert result.message == 'Project step 1/2 timed out after 0.25 seconds via mock-project'
+        assert not (tmp_path / 'later.txt').exists()
 
     @staticmethod
     async def test_project_sync_failure_message_includes_exit_code() -> None:

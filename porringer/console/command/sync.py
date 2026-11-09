@@ -279,6 +279,8 @@ def _display_summary(
     succeeded = sum(1 for r in package_results if r.success and not r.skipped)
     skipped = sum(1 for r in package_results if r.success and r.skipped)
     failed = sum(1 for r in package_results if not r.success)
+    prepared = sum(1 for r in package_results if r.success and not r.skipped and r.project_prepared)
+    prepared_msg = f', {prepared} project(s) prepared' if prepared else ''
 
     if results.success:
         skip_msg = f', {skipped} skipped' if skipped else ''
@@ -286,7 +288,7 @@ def _display_summary(
         detail = f'{succeeded} upgraded' if strategy == SyncStrategy.LATEST else f'{succeeded} synced'
         configuration.output.print(
             Panel(
-                f'[success]Complete![/success] {detail}{skip_msg}.',
+                f'[success]Complete![/success] {detail}{prepared_msg}{skip_msg}.',
                 border_style='green',
             )
         )
@@ -294,7 +296,7 @@ def _display_summary(
         skip_msg = f', {skipped} skipped' if skipped else ''
         configuration.output.print(
             Panel(
-                f'[error]Failed![/error] {succeeded} succeeded{skip_msg}, {failed} failed.',
+                f'[error]Failed![/error] {succeeded} succeeded{prepared_msg}{skip_msg}, {failed} failed.',
                 border_style='red',
             )
         )

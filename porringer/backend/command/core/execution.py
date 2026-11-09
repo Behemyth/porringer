@@ -1488,7 +1488,13 @@ def resolve_deferred_actions(
         action = actions[idx]
         assert action.kind is not None
         assert action.ecosystem is not None
-        installer = resolver.resolve(action.kind, action.ecosystem)
+        has_handoff = action.prepare_command is not None or action.native_command is not None
+        if action.kind == PluginKind.PROJECT and has_handoff and action.project_installer_hint:
+            hint = action.project_installer_hint
+            registered = resolver.registered_names(action.kind, action.ecosystem)
+            installer = hint if hint in registered and resolver.is_available(hint) else None
+        else:
+            installer = resolver.resolve(action.kind, action.ecosystem)
         if installer is not None:
             new_description = action_description(
                 action.kind,
@@ -1500,7 +1506,12 @@ def resolve_deferred_actions(
             logger.info('Deferred action resolved: %s -> %s', new_description, installer)
         else:
             registered = resolver.registered_names(action.kind, action.ecosystem)
-            if registered:
+            if action.kind == PluginKind.PROJECT and has_handoff and action.project_installer_hint:
+                logger.error(
+                    "Deferred project installer '%s' was previewed but is unavailable; refusing to substitute another",
+                    action.project_installer_hint,
+                )
+            elif registered:
                 logger.error(
                     'Deferred action permanently unresolved: %s (registered plugins %s for %s/%s are all unavailable)',
                     action.description,
@@ -1655,7 +1666,7 @@ async def _execute_project_install(
         return SetupActionResult(
             action=action,
             success=False,
-            message=f"Project environment '{action.installer}' is not available",
+            message=f"Project environment '{action.installer or action.project_installer_hint}' is not available",
         )
 
     proj_env = proj_envs[action.installer]
@@ -1695,6 +1706,7 @@ async def _execute_project_install(
             effective_dir,
             event_queue,
             runtime_context=runtime_context,
+            timeout_seconds=parameters.project_timeout_seconds,
         )
     except Exception as e:
         return SetupActionResult(action=action, success=False, message=str(e))
@@ -1707,13 +1719,16 @@ async def _run_project_install_steps(
     event_queue: asyncio.Queue[ProgressEvent | None],
     *,
     runtime_context: RuntimeContext | None = None,
+    timeout_seconds: float | None = None,
 ) -> SetupActionResult:
     """Run the resolved project-install steps and return their outcome."""
     # Always observe output: build the CLI steps from the plugin and
     # run them via run_command for line-by-line progress.
     plan = type(proj_env).command_plan(effective_dir, runtime_context=runtime_context)
     effective_dir = plan.directory
-    steps = project_steps(type(proj_env), plan, action.native_intent)
+    steps = project_steps(
+        type(proj_env), plan, action.native_intent, action.prepare_command, native_command=action.native_command
+    )
 
     success = True
     returncode: int | None = None
@@ -1753,7 +1768,18 @@ async def _run_project_install_steps(
             )
         )
         progress = CommandProgress(action=action, callback=step_callback, phase='project')
-        cmd_result = await run_command(args, progress=progress, cwd=effective_dir, timeout=300.0)
+        try:
+            cmd_result = await run_command(args, progress=progress, cwd=effective_dir, timeout_seconds=timeout_seconds)
+        except TimeoutError:
+            duration = f' after {timeout_seconds:g} seconds' if timeout_seconds is not None else ''
+            return SetupActionResult(
+                action=action,
+                success=False,
+                message=f'Project step {step_number}/{step_total} timed out{duration} via {action.installer}',
+                cli_command=tuple(plan.argv),
+                cli_steps=tuple(tuple(step) for step in steps),
+                failed_step_index=step_number,
+            )
         success = cmd_result.returncode == 0
         returncode = cmd_result.returncode
         if not success:
@@ -1767,6 +1793,7 @@ async def _run_project_install_steps(
             message=f'Installed project via {action.installer}',
             cli_command=tuple(plan.argv),
             cli_steps=tuple(tuple(step) for step in steps),
+            project_prepared=action.prepare_command is not None,
         )
     # Detailed subprocess output (stdout/stderr) is streamed live as
     # ActionProgress events during the run — the CLI surfaces a tail of

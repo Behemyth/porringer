@@ -9,10 +9,10 @@ from collections.abc import Collection, Iterator
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from packaging.utils import canonicalize_name
-from pydantic import Field, HttpUrl, StringConstraints, model_validator
+from pydantic import Field, HttpUrl, StringConstraints, field_validator, model_validator
 
 from porringer.core.schema import (
     Ecosystem,
@@ -126,6 +126,28 @@ class ManifestGroup(PorringerModel):
     description: str | None = Field(default=None, description='Human-readable purpose of the group')
 
 
+class ProjectPrepare(PorringerModel):
+    """Request the project installer's preparation step after synchronization."""
+
+    ecosystem: Ecosystem = Field(min_length=1, description='Ecosystem whose project sync owns this preparation')
+    prepare: Literal[True] = Field(
+        description='Run the project-owned preparation entry point through the selected project installer',
+    )
+
+    @field_validator('prepare', mode='before')
+    @classmethod
+    def _prepare_is_true(cls, value: object) -> object:
+        if value is not True:
+            raise ValueError('Project preparation requires prepare=true')
+        return value
+
+    @model_validator(mode='after')
+    def _valid_request(self) -> ProjectPrepare:
+        if not self.ecosystem.strip():
+            raise ValueError('Project preparation requires an ecosystem')
+        return self
+
+
 class SetupManifest(PorringerModel):
     """The setup manifest schema for .porringer files or pyproject.toml [tool.porringer].
 
@@ -179,6 +201,10 @@ class SetupManifest(PorringerModel):
         description="CPPython local-source intent, passed after the Python project sync to the project's own "
         '`cppython local apply`. Porringer does not interpret it, except that a relative `root` resolves '
         "against the manifest's directory",
+    )
+    project: ProjectPrepare | None = Field(
+        default=None,
+        description='Optional request for project-owned preparation after sync and native handoff',
     )
 
     @model_validator(mode='before')

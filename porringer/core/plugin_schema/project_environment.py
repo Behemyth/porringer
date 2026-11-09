@@ -150,6 +150,12 @@ class ProjectInstaller(ToolBasedPlugin, RuntimeConsumer, ManifestContributor):
         return None
 
     @classmethod
+    def prepare_command(cls) -> list[str] | None:
+        """Return the project-owned preparation entry point, or None if unsupported."""
+        prefix = cls.run_prefix()
+        return [*prefix, 'prepare'] if prefix else None
+
+    @classmethod
     def project_marker(cls) -> str | None:
         """Return the filename that marks this ecosystem's project root.
 
@@ -363,7 +369,7 @@ def native_apply_step(installer: type[ProjectInstaller], native_intent: str) -> 
         NativeHandoffUnsupportedError: If *installer* has no run prefix.
     """
     prefix = installer.run_prefix()
-    if prefix is None:
+    if not prefix or not prefix[0].strip() or any('\0' in arg for arg in prefix):
         raise NativeHandoffUnsupportedError(
             f"'{installer.tool_name()}' can't run commands in the project environment, "
             "so the manifest's 'native' section can't be applied"
@@ -372,13 +378,23 @@ def native_apply_step(installer: type[ProjectInstaller], native_intent: str) -> 
 
 
 def project_steps(
-    installer: type[ProjectInstaller], plan: ProjectCommandPlan, native_intent: str | None
+    installer: type[ProjectInstaller],
+    plan: ProjectCommandPlan,
+    native_intent: str | None,
+    prepare_command: tuple[str, ...] | None = None,
+    *,
+    native_command: tuple[str, ...] | None = None,
 ) -> list[list[str]]:
-    """Return the steps to run for *plan*, followed by the native handoff when there is an intent."""
+    """Return sync, native handoff, and project preparation in execution order."""
     steps = plan.steps or ([plan.argv] if plan.argv else [])
-    if native_intent is None:
-        return steps
-    return [*steps, native_apply_step(installer, native_intent)]
+    if native_intent is not None:
+        native_step = (
+            list(native_command) if native_command is not None else native_apply_step(installer, native_intent)
+        )
+        steps = [*steps, native_step]
+    if prepare_command is not None:
+        steps = [*steps, list(prepare_command)]
+    return steps
 
 
 def _has_nested_key(data: object, path: Sequence[str]) -> bool:

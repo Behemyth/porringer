@@ -40,6 +40,7 @@ Only its declared entries become actions, plus any installer they need first (fo
 | `preferences` | object | Optional installer preference per ecosystem, such as `{ "python": "uv" }`. |
 | `groups` | object | Optional entry groups that callers opt into, such as `{ "maintainer": { "description": "Release tools" } }`. See [Optional Groups](#optional-groups). |
 | `native` | object | Optional CPPython local-source intent, applied after the Python project sync. See [Native Local Sources](#native-local-sources). |
+| `project` | object | Optional request for the selected project installer's preparation step. See [Project Preparation](#project-preparation). |
 | `name` | string | Optional display name. |
 | `description` | string | Optional short description. |
 | `author` | string | Optional author or organization name. |
@@ -155,8 +156,41 @@ pdm run cppython local apply --clone --inline '{"default":"local",...}' --json
 - CPPython owns the format. Porringer doesn't validate the section beyond requiring an object; CPPython validates the whole document before it changes anything. Run `cppython local schema intent` for the schema.
 - A relative `root` resolves against the manifest's directory, and Porringer passes it to CPPython as an absolute path.
 - The selection is stored per user, not in the project. Applying a document merges it into the current selection, so running the install again changes nothing.
-- The step runs only with a Python project sync (PDM, Poetry, or uv). If no Python project sync is planned, Porringer logs a warning and ignores the section.
+- The step requires one Python project sync whose installer supports the handoff. Porringer reports an error during planning if no such sync exists.
 - Without a `native` section, Porringer leaves the selection alone.
+
+## Project Preparation
+
+A project can request its preparation entry point after its environment is
+synchronized and any native local-source intent is applied:
+
+```json
+{
+  "project": {
+    "ecosystem": "python",
+    "prepare": true
+  }
+}
+```
+
+The selected project installer supplies the command. For a PDM project this is
+`pdm run prepare`; the project defines what its `prepare` entry point does.
+Manifests cannot supply arbitrary command arguments. The command runs in the
+project root without a shell, and `porr preview` shows it before execution.
+The ecosystem must match exactly one project sync, and its installer must
+support preparation. Missing or ambiguous ownership is an error. A failed
+sync, native handoff, or preparation step fails the project action. Project
+scripts can execute code, so review their origin before confirming setup.
+Successful results report whether project preparation ran; they do not imply
+that the project was built or tested.
+
+Project sync, native handoff, and preparation commands have no time limit by
+default. To set a separate limit for each command, pass for example
+`porr install --project-timeout 1800`, or set `PORRINGER_PROJECT_TIMEOUT` to a
+positive number of seconds. API callers can set
+`SetupParameters(project_timeout_seconds=1800)`. If a command times out,
+Porringer reports the failed step and does not run later project steps. This
+option does not change the timeouts for package, runtime, or SCM actions.
 
 ## Inference
 

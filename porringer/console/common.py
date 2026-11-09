@@ -219,6 +219,7 @@ def build_setup_parameters(
     paths: Path | list[str] | None,
     *,
     project_directory: Path | None = None,
+    project_timeout_seconds: float | None = None,
     strategy: SyncStrategy = SyncStrategy.MINIMAL,
     plugin_names: set[str] | None = None,
     action_ids: set[str] | None = None,
@@ -236,6 +237,7 @@ def build_setup_parameters(
     return SetupParameters(
         paths=paths,
         project_directory=project_directory,
+        project_timeout_seconds=project_timeout_seconds,
         fail_fast=fail_fast,
         strategy=strategy,
         plugin_names=plugin_names,

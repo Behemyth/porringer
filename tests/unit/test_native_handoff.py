@@ -1,7 +1,7 @@
 """Tests for handing a manifest's `native` section to the project's own CPPython."""
 
 import json
-import logging
+import sys
 from asyncio import Queue
 from pathlib import Path
 from typing import Any
@@ -10,17 +10,31 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from packaging.version import Version
 from pydantic import ValidationError
+from rich.console import Console
 
 from porringer.backend.command.core import execution
 from porringer.backend.command.core.action_builder import build_actions, get_cli_steps, native_intent_json
 from porringer.backend.command.core.discovery import DiscoveredPlugins
-from porringer.core.plugin_schema.project_environment import NATIVE_APPLY_COMMAND, native_apply_step
+from porringer.console.command import sync as sync_command
+from porringer.console.schema import ConsoleConfiguration
+from porringer.core.plugin_schema.project_environment import NATIVE_APPLY_COMMAND, ProjectCommandPlan, native_apply_step
+from porringer.core.plugin_schema.runtime import RuntimeContext
 from porringer.core.schema import Distribution, PluginKind, PluginParameters
 from porringer.plugin.pdm.plugin import PDMEnvironment
 from porringer.plugin.poetry.plugin import PoetryEnvironment
 from porringer.plugin.uv.plugin import UvEnvironment
-from porringer.schema import SetupAction, SetupManifest, SetupParameters
+from porringer.schema import (
+    ActionCompletedEvent,
+    BatchSetupResults,
+    SetupAction,
+    SetupActionResult,
+    SetupManifest,
+    SetupParameters,
+    SetupResults,
+    progress_event_snapshot,
+)
 from porringer.test.mock.project_environment import MockProjectEnvironment
+from porringer.utility.exception import ManifestError
 from porringer.utility.utility import CommandResult
 
 _NATIVE = {'schema_version': 1, 'root': '..', 'default': 'local', 'packages': {'periapsis': {}}}
@@ -83,6 +97,9 @@ def test_python_project_installers_have_run_prefixes() -> None:
     assert PDMEnvironment.run_prefix() == ['pdm', 'run']
     assert PoetryEnvironment.run_prefix() == ['poetry', 'run']
     assert UvEnvironment.run_prefix() == ['uv', 'run', '--no-sync']
+    assert PDMEnvironment.prepare_command() == ['pdm', 'run', 'prepare']
+    assert PoetryEnvironment.prepare_command() == ['poetry', 'run', 'prepare']
+    assert UvEnvironment.prepare_command() == ['uv', 'run', '--no-sync', 'prepare']
     assert native_apply_step(PDMEnvironment, '{}') == [
         'pdm',
         'run',
@@ -133,35 +150,301 @@ async def test_execution_runs_exactly_the_previewed_steps(tmp_path: Path) -> Non
         )
 
     assert result.success, result.message
+    assert not result.project_prepared
     assert tuple(tuple(call.args[0]) for call in mock_run.await_args_list) == get_cli_steps(action, plugins)
     assert all(call.kwargs['cwd'] == root for call in mock_run.await_args_list)
 
 
-async def test_installer_without_run_prefix_fails_before_running(tmp_path: Path) -> None:
-    """An installer that can't run the handoff fails the action instead of skipping the intent."""
+def test_installer_without_run_prefix_fails_during_planning(tmp_path: Path) -> None:
+    """An unsupported handoff is an error, not an incomplete preview."""
     root = _project(tmp_path)
     plugins = _plugins(_UnrunnableProject)
-    action = _project_action(build_actions(SetupManifest(native=_NATIVE), plugins, search_from=root))
+    with pytest.raises(ManifestError, match="'native'.*can't be applied"):
+        build_actions(SetupManifest(native=_NATIVE), plugins, search_from=root)
 
-    assert get_cli_steps(action, plugins) == (('mock-project', 'sync'),)
-    with patch('porringer.backend.command.core.execution.run_command', new_callable=AsyncMock) as mock_run:
+
+def test_native_without_python_project_fails(tmp_path: Path) -> None:
+    """Native intent must never be silently omitted when it has no project owner."""
+    with pytest.raises(ManifestError, match='requires exactly one Python project sync'):
+        build_actions(SetupManifest(native=_NATIVE), _plugins(), search_from=tmp_path)
+
+
+@pytest.mark.parametrize(
+    'project',
+    [
+        {'ecosystem': 'python', 'prepare': []},
+        {'ecosystem': 'python', 'prepare': ['pdm', 'run', 'prepare']},
+        {'ecosystem': 'python', 'prepare': False},
+        {'ecosystem': 'python', 'prepare': 'true'},
+        {'ecosystem': 'python', 'prepare': 1},
+        {'ecosystem': 'python'},
+        {'ecosystem': '', 'prepare': True},
+    ],
+)
+def test_invalid_project_preparation_is_rejected(project: dict[str, Any]) -> None:
+    """Preparation is an explicit typed request, not a manifest-supplied command."""
+    with pytest.raises(ValidationError):
+        SetupManifest.model_validate({'project': project})
+
+
+def test_preparation_follows_sync_and_native_handoff(tmp_path: Path) -> None:
+    """The preview exposes the exact argv after native source selection."""
+    root = _project(tmp_path)
+    plugins = _plugins()
+    manifest = SetupManifest.model_validate({'native': _NATIVE, 'project': {'ecosystem': 'python', 'prepare': True}})
+    action = _project_action(build_actions(manifest, plugins, search_from=root))
+
+    steps = get_cli_steps(action, plugins)
+    assert steps[0] == ('mock-project', 'sync')
+    assert steps[1][:5] == ('mock-project', 'run', *NATIVE_APPLY_COMMAND)
+    assert steps[2] == ('mock-project', 'run', 'prepare')
+
+
+async def test_preparation_execution_matches_preview(tmp_path: Path) -> None:
+    """The project-owned argv runs in the project root without a shell."""
+    root = _project(tmp_path)
+    plugins = _plugins()
+    manifest = SetupManifest.model_validate({'project': {'ecosystem': 'python', 'prepare': True}})
+    action = _project_action(build_actions(manifest, plugins, search_from=root))
+
+    with patch(
+        'porringer.backend.command.core.execution.run_command',
+        new_callable=AsyncMock,
+        return_value=CommandResult(returncode=0, stdout='', stderr=''),
+    ) as mock_run:
+        result = await execution._execute_project_install(
+            action, plugins.project_environments, root, SetupParameters(), event_queue=Queue()
+        )
+
+    assert result.success, result.message
+    assert result.project_prepared
+    assert tuple(tuple(call.args[0]) for call in mock_run.await_args_list) == get_cli_steps(action, plugins)
+    assert all(call.kwargs['cwd'] == root for call in mock_run.await_args_list)
+
+
+async def test_handoff_commands_remain_as_previewed_if_plugin_changes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Native and preparation commands are fixed when the action is planned."""
+    root = _project(tmp_path)
+    plugins = _plugins()
+    manifest = SetupManifest.model_validate({'native': _NATIVE, 'project': {'ecosystem': 'python', 'prepare': True}})
+    action = _project_action(build_actions(manifest, plugins, search_from=root))
+    preview = get_cli_steps(action, plugins)
+    monkeypatch.setattr(_RunnableProject, 'run_prefix', classmethod(lambda cls: ['different-tool', 'run']))
+
+    with patch(
+        'porringer.backend.command.core.execution.run_command',
+        new_callable=AsyncMock,
+        return_value=CommandResult(returncode=0, stdout='', stderr=''),
+    ) as run:
+        result = await execution._execute_project_install(
+            action, plugins.project_environments, root, SetupParameters(), event_queue=Queue()
+        )
+
+    assert result.success, result.message
+    assert tuple(tuple(call.args[0]) for call in run.await_args_list) == preview
+    assert get_cli_steps(action, plugins) == preview
+
+
+async def test_real_project_subprocesses_match_preview(tmp_path: Path) -> None:
+    """Run the previewed sync, native handoff, and preparation as real subprocesses."""
+    root = _project(tmp_path)
+
+    def command(label: str) -> list[str]:
+        script = f"from pathlib import Path; Path('steps.log').open('a').write('{label}\\n')"
+        return [sys.executable, '-c', script]
+
+    class _ScriptedProject(_RunnableProject):
+        @classmethod
+        def command_plan(
+            cls, search_from: Path, *, runtime_context: RuntimeContext | None = None
+        ) -> ProjectCommandPlan:
+            argv = command('sync')
+            return ProjectCommandPlan(directory=search_from, argv=argv, steps=[argv])
+
+        @classmethod
+        def run_prefix(cls) -> list[str]:
+            return command('native')
+
+        @classmethod
+        def prepare_command(cls) -> list[str]:
+            return command('prepare')
+
+    plugins = _plugins(_ScriptedProject)
+    manifest = SetupManifest.model_validate({'native': _NATIVE, 'project': {'ecosystem': 'python', 'prepare': True}})
+    action = _project_action(build_actions(manifest, plugins, search_from=root))
+    preview = get_cli_steps(action, plugins)
+
+    result = await execution._execute_project_install(
+        action, plugins.project_environments, root, SetupParameters(), event_queue=Queue()
+    )
+
+    assert result.success, result.message
+    assert result.project_prepared
+    assert result.cli_steps == preview
+    assert (root / 'steps.log').read_text(encoding='utf-8').splitlines() == ['sync', 'native', 'prepare']
+    snapshot = progress_event_snapshot(ActionCompletedEvent(action=action, result=result))
+    assert snapshot.result is not None
+    assert snapshot.result.model_dump(mode='json')['project_prepared'] is True
+
+
+def test_final_output_distinguishes_prepared_projects() -> None:
+    """A project is called prepared only when its preparation completed."""
+    configuration = ConsoleConfiguration(console=Console(record=True))
+    action = SetupAction(description='Sync project')
+    results = BatchSetupResults(
+        manifest_results=[SetupResults(results=[SetupActionResult(action=action, success=True, project_prepared=True)])]
+    )
+
+    sync_command._display_results(configuration, results)
+
+    assert '1 project(s) prepared' in configuration.console.export_text()
+
+
+async def test_failed_sync_does_not_run_preparation(tmp_path: Path) -> None:
+    """A failed project sync stops before running its preparation step."""
+    root = _project(tmp_path)
+    plugins = _plugins()
+    manifest = SetupManifest.model_validate({'project': {'ecosystem': 'python', 'prepare': True}})
+    action = _project_action(build_actions(manifest, plugins, search_from=root))
+
+    with patch(
+        'porringer.backend.command.core.execution.run_command',
+        new_callable=AsyncMock,
+        return_value=CommandResult(returncode=1, stdout='', stderr='sync failed'),
+    ) as mock_run:
         result = await execution._execute_project_install(
             action, plugins.project_environments, root, SetupParameters(), event_queue=Queue()
         )
 
     assert not result.success
-    assert result.message is not None
-    assert "'native'" in result.message
-    mock_run.assert_not_awaited()
+    assert not result.project_prepared
+    assert result.failed_step_index == 1
+    mock_run.assert_awaited_once()
 
 
-def test_native_without_python_project_warns(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
-    """Without a Python project sync, the section is ignored with a warning."""
-    with caplog.at_level(logging.WARNING):
-        actions = build_actions(SetupManifest(native=_NATIVE), _plugins(), search_from=tmp_path)
+async def test_failed_preparation_is_not_reported_as_prepared(tmp_path: Path) -> None:
+    """A successful sync does not turn a failed preparation into a success."""
+    root = _project(tmp_path)
+    plugins = _plugins()
+    manifest = SetupManifest.model_validate({'project': {'ecosystem': 'python', 'prepare': True}})
+    action = _project_action(build_actions(manifest, plugins, search_from=root))
+    results = [
+        CommandResult(returncode=0, stdout='', stderr=''),
+        CommandResult(returncode=1, stdout='', stderr='preparation failed'),
+    ]
 
-    assert not any(action.kind == PluginKind.PROJECT for action in actions)
-    assert "'native' section was ignored" in caplog.text
+    with patch(
+        'porringer.backend.command.core.execution.run_command', new_callable=AsyncMock, side_effect=results
+    ) as run:
+        result = await execution._execute_project_install(
+            action, plugins.project_environments, root, SetupParameters(), event_queue=Queue()
+        )
+
+    assert not result.success
+    assert not result.project_prepared
+    assert result.failed_step_index == len(results)
+    assert run.await_count == len(results)
+
+
+def test_preparation_without_matching_project_fails(tmp_path: Path) -> None:
+    """Never claim setup succeeded if the required project step has no owner."""
+    manifest = SetupManifest.model_validate({'project': {'ecosystem': 'python', 'prepare': True}})
+    with pytest.raises(ManifestError, match='requires exactly one'):
+        build_actions(manifest, _plugins(), search_from=tmp_path)
+
+
+def test_preparation_without_installer_capability_fails_during_planning(tmp_path: Path) -> None:
+    """An unsupported preparation command must not be omitted from preview."""
+    root = _project(tmp_path)
+    manifest = SetupManifest.model_validate({'project': {'ecosystem': 'python', 'prepare': True}})
+
+    with pytest.raises(ManifestError, match='cannot provide a preparation command'):
+        build_actions(manifest, _plugins(_UnrunnableProject), search_from=root)
+
+
+async def test_failed_native_handoff_does_not_run_preparation(tmp_path: Path) -> None:
+    """A failed native selection stops before project preparation."""
+    root = _project(tmp_path)
+    plugins = _plugins()
+    manifest = SetupManifest.model_validate({'native': _NATIVE, 'project': {'ecosystem': 'python', 'prepare': True}})
+    action = _project_action(build_actions(manifest, plugins, search_from=root))
+    results = [
+        CommandResult(returncode=0, stdout='', stderr=''),
+        CommandResult(returncode=1, stdout='', stderr='native handoff failed'),
+    ]
+
+    with patch(
+        'porringer.backend.command.core.execution.run_command', new_callable=AsyncMock, side_effect=results
+    ) as run:
+        result = await execution._execute_project_install(
+            action, plugins.project_environments, root, SetupParameters(), event_queue=Queue()
+        )
+
+    assert not result.success
+    assert not result.project_prepared
+    assert result.failed_step_index == len(results)
+    assert run.await_count == len(results)
+
+
+@pytest.mark.parametrize(
+    'sections',
+    [
+        {'project': {'ecosystem': 'python', 'prepare': True}},
+        {'native': _NATIVE},
+        {'native': _NATIVE, 'project': {'ecosystem': 'python', 'prepare': True}},
+    ],
+)
+def test_deferred_project_keeps_previewed_installer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sections: dict[str, Any]
+) -> None:
+    """Installing a different tool must not change the authorized project handoff."""
+    root = _project(tmp_path)
+    (root / 'mock-project.lock').touch()
+
+    class _DeferredProject(_RunnableProject):
+        _project_evidence_files = ('mock-project.lock',)
+
+        @classmethod
+        def is_available(cls) -> bool:
+            return False
+
+    class _AlternateProject(_RunnableProject):
+        @classmethod
+        def tool_name(cls) -> str:
+            return 'alternate'
+
+        @classmethod
+        def run_prefix(cls) -> list[str]:
+            return ['alternate', 'run']
+
+    params = PluginParameters(distribution=Distribution(version=Version('0.0.0')))
+    plugins = DiscoveredPlugins(
+        environments={},
+        project_environments={
+            'mock-project': _DeferredProject(params),
+            'alternate': _AlternateProject(params),
+        },
+        scm_environments={},
+    )
+    manifest = SetupManifest.model_validate(sections)
+    action = _project_action(build_actions(manifest, plugins, search_from=root))
+    assert action.installer is None
+    preview = get_cli_steps(action, plugins)
+    assert preview[0] == ('mock-project', 'sync')
+    if 'native' in sections:
+        assert preview[1][:5] == ('mock-project', 'run', *NATIVE_APPLY_COMMAND)
+    if 'project' in sections:
+        assert preview[-1] == ('mock-project', 'run', 'prepare')
+
+    actions = [action]
+    execution.resolve_deferred_actions(actions, plugins)
+    assert actions[0].installer is None
+    monkeypatch.setattr(_DeferredProject, 'is_available', classmethod(lambda cls: True))
+    execution.resolve_deferred_actions(actions, plugins)
+    assert actions[0].installer == 'mock-project'
+    assert get_cli_steps(actions[0], plugins) == preview
 
 
 def _fixture(name: str) -> dict[str, Any]:

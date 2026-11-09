@@ -23,6 +23,7 @@ from porringer.schema import (
 from porringer.utility.exception import PlanStaleError
 
 _EXPECTED_CONFIRMATION_PROMPTS_AFTER_ONE_RETRY = 2
+_PROJECT_TIMEOUT_SECONDS = 12.5
 
 
 def _empty_plan() -> SyncPlan:
@@ -120,6 +121,82 @@ class TestInstallCLI:
         assert plan_mock.await_args is not None
         (params,) = plan_mock.await_args.args
         assert params.inspection_mode == InspectionMode.COMPLETE
+
+    @staticmethod
+    @pytest.mark.parametrize(
+        ('arguments', 'environment'),
+        [
+            (['--project-timeout', '12.5'], {'PORRINGER_PROJECT_TIMEOUT': '20'}),
+            ([], {'PORRINGER_PROJECT_TIMEOUT': '12.5'}),
+        ],
+    )
+    def test_project_timeout_reaches_confirmed_plan(
+        tmp_path: Path, test_config, arguments: list[str], environment: dict[str, str]
+    ) -> None:
+        """A CLI or environment timeout is included in the plan shown for confirmation."""
+        _write_manifest(tmp_path, {'version': '1'})
+        runner = CliRunner()
+
+        with patch(
+            'porringer.backend.command.sync.SyncCommands.plan',
+            new_callable=AsyncMock,
+            return_value=_empty_plan(),
+        ) as plan_mock:
+            result = runner.invoke(
+                app, ['install', str(tmp_path), *arguments], obj=test_config, input='n\n', env=environment
+            )
+
+        assert result.exit_code == 0
+        assert plan_mock.await_args is not None
+        (params,) = plan_mock.await_args.args
+        assert params.project_timeout_seconds == _PROJECT_TIMEOUT_SECONDS
+        assert 'Project command timeout: 12.5 seconds per step' in result.output
+
+    @staticmethod
+    @pytest.mark.parametrize('value', ['0', '-1', 'nan', 'inf'])
+    def test_install_rejects_invalid_project_timeout(tmp_path: Path, test_config, value: str) -> None:
+        """Invalid timeout values fail with a useful CLI error."""
+        _write_manifest(tmp_path, {'version': '1'})
+        result = CliRunner().invoke(app, ['install', str(tmp_path), '--project-timeout', value], obj=test_config)
+
+        assert result.exit_code != 0
+        assert 'positive finite number' in result.output
+
+    @staticmethod
+    def test_project_timeout_reaches_profile_execution(test_config) -> None:
+        """Profile execution receives the same project-command limit."""
+        runner = CliRunner()
+        execution = SimpleNamespace(results=SimpleNamespace(success=True))
+
+        with (
+            patch(
+                'porringer.backend.command.profile.ProfileCommands.inspect',
+                new_callable=AsyncMock,
+                return_value=_fake_inspection(),
+            ),
+            patch(
+                'porringer.backend.command.profile.ProfileCommands.run',
+                new_callable=AsyncMock,
+                return_value=execution,
+            ) as run,
+            patch('porringer.console.command.sync._display_results'),
+        ):
+            result = runner.invoke(
+                app,
+                [
+                    'install',
+                    'porringer://profile?url=https://example.com/profile.json',
+                    '--project-timeout',
+                    '12.5',
+                    '--yes',
+                ],
+                obj=test_config,
+            )
+
+        assert result.exit_code == 0
+        assert run.await_args is not None
+        assert run.await_args.kwargs['parameters'].project_timeout_seconds == _PROJECT_TIMEOUT_SECONDS
+        assert 'Project command timeout: 12.5 seconds per step' in result.output
 
     @staticmethod
     def test_stale_plan_is_refused(tmp_path: Path, test_config) -> None:

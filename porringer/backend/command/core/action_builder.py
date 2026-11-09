@@ -24,6 +24,7 @@ from porringer.core.plugin_schema.environment import Environment, PackageParamet
 from porringer.core.plugin_schema.project_environment import (
     NativeHandoffUnsupportedError,
     ProjectInstaller,
+    native_apply_step,
     project_steps,
 )
 from porringer.core.schema import Ecosystem, PackageRef, PluginKind
@@ -31,6 +32,7 @@ from porringer.schema import (
     ManifestGroupInfo,
     ManifestMetadata,
     PackageSpec,
+    ProjectPrepare,
     SetupAction,
     SetupManifest,
     SetupResults,
@@ -152,6 +154,20 @@ def action_description(
     return f'{verb} {suffix}'
 
 
+def _project_cli_steps(action: SetupAction, plugins: DiscoveredPlugins) -> tuple[tuple[str, ...], ...]:
+    project_environments = plugins.project_environments or {}
+    has_handoff = action.prepare_command is not None or action.native_command is not None
+    installer_name = action.installer or (action.project_installer_hint if has_handoff else None)
+    if installer_name and installer_name in project_environments:
+        installer = project_environments[installer_name]
+        plan = installer.command_plan(Path('.'), runtime_context=plugins.runtime_context)
+        steps = project_steps(
+            type(installer), plan, action.native_intent, action.prepare_command, native_command=action.native_command
+        )
+        return tuple(tuple(step) for step in steps)
+    return (action.prepare_command,) if action.prepare_command is not None else ()
+
+
 def get_cli_steps(
     action: SetupAction,
     plugins: DiscoveredPlugins,
@@ -174,7 +190,6 @@ def get_cli_steps(
         Ordered command steps, or an empty tuple if not applicable.
     """
     environments = plugins.environments
-    project_environments = plugins.project_environments
     scm_environments = plugins.scm_environments
     # Preview must show the command execution will actually run, so every
     # branch forwards the same resolved runtime context execution uses.
@@ -193,19 +208,7 @@ def get_cli_steps(
                 command = env.package_command(verb, params)
                 return (command.argv,) if command.argv else ()
         case PluginKind.PROJECT:
-            proj_envs = project_environments or {}
-            if action.installer and action.installer in proj_envs:
-                # search_from only affects ProjectCommandPlan.directory (project
-                # root auto-discovery), never the steps we read here, so a
-                # placeholder path is fine for command display purposes.
-                installer = proj_envs[action.installer]
-                plan = installer.command_plan(Path('.'), runtime_context=runtime_context)
-                try:
-                    steps = project_steps(type(installer), plan, action.native_intent)
-                except NativeHandoffUnsupportedError:
-                    # Execution reports this as the action's failure; show what would run before it.
-                    steps = project_steps(type(installer), plan, None)
-                return tuple(tuple(step) for step in steps)
+            return _project_cli_steps(action, plugins)
         case PluginKind.SCM:
             scm_envs = scm_environments or {}
             if action.installer and action.package and action.installer in scm_envs:
@@ -485,6 +488,7 @@ def _build_implicit_project_actions(
                         kind=PluginKind.PROJECT,
                         ecosystem=ecosystem,
                         installer=None,
+                        project_installer_hint=intended,
                     )
                 )
             else:
@@ -909,19 +913,76 @@ def native_intent_json(native: dict[str, Any], base_directory: Path) -> str:
     return json.dumps(intent, sort_keys=True, separators=(',', ':'))
 
 
-def _attach_native_intent(actions: list[SetupAction], native: dict[str, Any], search_from: Path) -> None:
+def _attach_native_intent(
+    actions: list[SetupAction],
+    native: dict[str, Any],
+    plugins: DiscoveredPlugins,
+    search_from: Path,
+) -> None:
     """Hand the manifest's ``native`` section to the Python project sync action."""
     intent = native_intent_json(native, search_from)
-    attached = False
-    for index, action in enumerate(actions):
-        if action.kind == PluginKind.PROJECT and action.ecosystem == _PYTHON_ECOSYSTEM:
-            actions[index] = replace(action, native_intent=intent)
-            attached = True
-    if not attached:
-        logger.warning(
-            "The manifest's 'native' section was ignored because no Python project sync is planned for %s",
-            search_from,
+    matches = [
+        index
+        for index, action in enumerate(actions)
+        if action.kind == PluginKind.PROJECT and action.ecosystem == _PYTHON_ECOSYSTEM
+    ]
+    if len(matches) != 1:
+        raise ManifestError(
+            f'Native intent requires exactly one Python project sync in {search_from}',
+            code=ManifestValidationCode.SCHEMA_INVALID,
         )
+    index = matches[0]
+    action = actions[index]
+    installer_name = action.installer or action.project_installer_hint
+    installer = plugins.project_environments.get(installer_name) if installer_name is not None else None
+    if installer is None:
+        raise ManifestError(
+            f'Project installer {installer_name!r} cannot provide a native handoff',
+            code=ManifestValidationCode.SCHEMA_INVALID,
+        )
+    try:
+        command = tuple(native_apply_step(type(installer), intent))
+    except NativeHandoffUnsupportedError as exc:
+        raise ManifestError(str(exc), code=ManifestValidationCode.SCHEMA_INVALID) from exc
+    actions[index] = replace(
+        action,
+        native_intent=intent,
+        native_command=command,
+        project_installer_hint=installer_name,
+    )
+
+
+def _attach_project_preparation(
+    actions: list[SetupAction],
+    project: ProjectPrepare,
+    plugins: DiscoveredPlugins,
+    search_from: Path,
+) -> None:
+    matches = [
+        index
+        for index, action in enumerate(actions)
+        if action.kind == PluginKind.PROJECT and action.ecosystem == project.ecosystem
+    ]
+    if len(matches) != 1:
+        raise ManifestError(
+            f'Project preparation requires exactly one {project.ecosystem!r} project sync in {search_from}',
+            code=ManifestValidationCode.SCHEMA_INVALID,
+        )
+    index = matches[0]
+    action = actions[index]
+    installer_name = action.installer or action.project_installer_hint
+    installer = plugins.project_environments.get(installer_name) if installer_name is not None else None
+    command = type(installer).prepare_command() if installer is not None else None
+    if not command or not command[0].strip() or any('\0' in arg for arg in command):
+        raise ManifestError(
+            f'Project installer {installer_name!r} cannot provide a preparation command',
+            code=ManifestValidationCode.SCHEMA_INVALID,
+        )
+    actions[index] = replace(
+        action,
+        prepare_command=tuple(command),
+        project_installer_hint=installer_name,
+    )
 
 
 def build_actions(
@@ -1011,7 +1072,10 @@ def build_actions(
         actions.extend(implicit_project_actions)
 
     if manifest.native is not None:
-        _attach_native_intent(actions, manifest.native, search_from)
+        _attach_native_intent(actions, manifest.native, plugins, search_from)
+
+    if manifest.project is not None:
+        _attach_project_preparation(actions, manifest.project, plugins, search_from)
 
     bootstrap_actions = _build_bootstrap_actions(actions, plugins, resolver, dict(manifest.preferences), verb)
     if bootstrap_actions:

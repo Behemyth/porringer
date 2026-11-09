@@ -6,6 +6,7 @@ Porringer CLI install command.
 import asyncio
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
+from math import isfinite
 from pathlib import Path
 from typing import Annotated
 
@@ -43,6 +44,7 @@ class _InstallOptions:
     """Bundled options for install execution."""
 
     project_directory: Path | None = None
+    project_timeout_seconds: float | None = None
     fail_fast: bool = True
     strategy: SyncStrategy = SyncStrategy.MINIMAL
     plugin_names: set[str] | None = None
@@ -58,6 +60,11 @@ def _confirm_or_abort(configuration: ConsoleConfiguration, yes: bool) -> None:
     confirm_or_abort(configuration, yes=yes, prompt='Apply this setup plan?')
 
 
+def _display_project_timeout(configuration: ConsoleConfiguration, timeout_seconds: float | None) -> None:
+    if timeout_seconds is not None:
+        configuration.output.print(f'Project command timeout: {timeout_seconds:g} seconds per step')
+
+
 def _run_manifest_install(
     configuration: ConsoleConfiguration,
     api: API,
@@ -68,6 +75,7 @@ def _run_manifest_install(
     setup_params = build_setup_parameters(
         paths,
         project_directory=options.project_directory,
+        project_timeout_seconds=options.project_timeout_seconds,
         strategy=options.strategy,
         plugin_names=options.plugin_names,
         action_ids=options.action_ids,
@@ -89,6 +97,7 @@ def _run_manifest_install(
             configuration.output.error(str(exc))
             raise typer.Exit(EXIT_FAILURE) from None
         _display_report(configuration, plan.report, compact=True)
+        _display_project_timeout(configuration, options.project_timeout_seconds)
 
     try:
         _confirm_or_abort(configuration, options.yes)
@@ -147,6 +156,7 @@ def _run_profile_install(
             )
         )
     _display_report(configuration, inspection.inspection)
+    _display_project_timeout(configuration, options.project_timeout_seconds)
 
     _confirm_or_abort(configuration, options.yes)
 
@@ -156,6 +166,7 @@ def _run_profile_install(
             parameters=build_setup_parameters(
                 None,
                 project_directory=options.project_directory,
+                project_timeout_seconds=options.project_timeout_seconds,
                 strategy=options.strategy,
                 plugin_names=options.plugin_names,
                 action_ids=options.action_ids,
@@ -175,6 +186,14 @@ def install_default(  # noqa: PLR0913
     target: TargetArgument = None,
     *,
     project_dir: ProjectDirOption = None,
+    project_timeout: Annotated[
+        float | None,
+        typer.Option(
+            '--project-timeout',
+            envvar='PORRINGER_PROJECT_TIMEOUT',
+            help='Maximum seconds per project command; unset means no time limit',
+        ),
+    ] = None,
     fail_fast: Annotated[
         bool,
         typer.Option('--fail-fast/--no-fail-fast', help='Stop on the first error'),
@@ -214,6 +233,8 @@ def install_default(  # noqa: PLR0913
     anything. Pass --yes (or set PORRINGER_ASSUME_YES=1) to run unattended.
     """
     configuration = context.ensure_object(ConsoleConfiguration)
+    if project_timeout is not None and (not isfinite(project_timeout) or project_timeout <= 0):
+        raise typer.BadParameter('must be a positive finite number of seconds', param_hint='--project-timeout')
 
     shared = parse_shared_options(
         configuration,
@@ -225,6 +246,7 @@ def install_default(  # noqa: PLR0913
     )
     options = _InstallOptions(
         project_directory=shared.project_directory,
+        project_timeout_seconds=project_timeout,
         fail_fast=fail_fast,
         strategy=shared.strategy,
         plugin_names=shared.plugin_names,
