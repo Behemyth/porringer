@@ -222,7 +222,7 @@ class TestInstallCLI:
         assert result.exit_code == 1
         assert run_mock.await_args is not None
         assert run_mock.await_args.kwargs['plan'] is plan
-        assert 'Run the install again' in result.output
+        assert 'Run the install again' in ' '.join(result.output.split())
 
     @staticmethod
     def test_invalid_confirmation_input_reprompts(tmp_path: Path, test_config) -> None:
