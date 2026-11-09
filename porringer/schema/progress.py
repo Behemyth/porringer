@@ -16,8 +16,9 @@ from porringer.schema.inspection import (
     ActionSnapshot,
     DiscoveredPluginSnapshot,
 )
-from porringer.schema.observability import SCHEMA_VERSION, ActionRef
+from porringer.schema.observability import SCHEMA_VERSION, ActionRef, Diagnostic
 from porringer.schema.plugin import PluginCapability
+from porringer.schema.preparation import PreparationMetadata
 
 
 @dataclass(slots=True)
@@ -166,6 +167,8 @@ class SetupActionResultSnapshot(PorringerModel):
     cli_steps: tuple[tuple[str, ...], ...] = Field(default_factory=tuple)
     failed_step_index: int | None = None
     project_prepared: bool = False
+    preparation_metadata: PreparationMetadata | None = None
+    preparation_diagnostics: tuple[Diagnostic, ...] = Field(default_factory=tuple)
 
 
 class ActionProgressSnapshot(PorringerModel):
@@ -254,6 +257,8 @@ def _snapshot_result(result: SetupActionResult) -> SetupActionResultSnapshot:
         cli_steps=result.cli_steps or (),
         failed_step_index=result.failed_step_index,
         project_prepared=result.project_prepared,
+        preparation_metadata=result.preparation_metadata,
+        preparation_diagnostics=result.preparation_diagnostics,
     )
 
 

@@ -239,10 +239,74 @@ porringer install ./my-project --only-action 0:2
 | `--plugin` | Include only actions for selected plugin names. Repeatable. |
 | `--only-action` | Run only a stable action ID such as `0:2`. Repeatable. |
 | `--with` | Include an optional manifest group, such as `maintainer`. Repeatable. |
+| `--json` | Emit one versioned install result on stdout, with preparation metadata when reported. Human output goes to stderr. |
 | `--jsonl` | Emit progress events and the final result as newline-delimited JSON. |
 | `--record` | Write a replayable JSON run record to the given path. |
 | `--yes`, `-y` | Skip the confirmation prompt. |
 | `--global` | Install your global manifest instead of a project's. |
+
+## Machine-readable preparation status
+
+Use `porr install --json --yes` for unattended consumers. `--json` does not
+change the install steps or their exit codes. Without `--yes`, confirmation
+is still required. Human preview, progress, and errors go to stderr; stdout
+contains one JSON document. `--json` and `--jsonl` cannot be combined.
+
+The result uses the public `ResultEnvelope` (`schema_version: "2"`,
+`operation: "install"`) with summary counts and structured diagnostics.
+Its `payload` follows `InstallPayload` version `"1"`:
+
+| Payload field | Meaning |
+| --- | --- |
+| `schema_version` | `"1"` for this install payload. |
+| `outcome` | `completed`, `failed`, or `cancelled`. A declined confirmation remains exit code 0; EOF without confirmation remains a failure. |
+| `preparation` | One `PreparationStatus` per returned project action result. Empty when there are no project results, including cancellation before execution. |
+| `native_build`, `native_test` | Always `not_verified`. Preparation success is not native build or test success. |
+
+Each preparation entry has `action_id` when available, an `outcome`
+(`prepared`, `failed`, `skipped`, or `not_requested`), optional `metadata`,
+structured `diagnostics`, and the same explicit native verification limits.
+An install without requested preparation uses `not_requested` and null metadata.
+
+Metadata is accepted only from the project-owned preparation step, never
+inferred from a manifest, identity name, or directory layout. CPPython's
+opt-in preparation report contains:
+
+- `schema_version: "1"`.
+- `identity`: the identity actually selected by CPPython, or null for a
+  project without an identity.
+- `backend`: the selected native build-system/generator, such as `cmake` or
+  `meson`, not a Python packaging backend inferred from it.
+- `provider`: the selected dependency provider's name, such as `conan`.
+- `dependency_outputs`: the provider's actual installation output directories,
+  or null when the provider does not expose them. Conan reports its own
+  resolved output folders, including identity-specific folders.
+
+Porringer sets `CPPYTHON_PREPARATION_REPORT` to a unique, absolute JSON report
+filepath in the project directory, scoped to the preparation subprocess only.
+CPPython exclusively creates that file after successful installation.
+Porringer reads it only when the preparation subprocess succeeds, then removes
+it on success, failure, timeout, or cancellation. Normal stdout and stderr logs
+continue streaming unchanged; log contents are never interpreted as metadata.
+The project still runs its existing preparation entry point, with its dependency
+groups and other options intact.
+
+Older CPPython versions and other preparation scripts can succeed without
+creating the report. In that case, metadata is null and a
+`preparation.metadata_unavailable` warning is returned. The envelope status is
+`partial`, but a successful install still exits 0.
+
+Malformed reports produce `preparation.metadata_invalid`; unreadable reports
+produce `preparation.metadata_read_failed`. These are explicit errors that make
+the install fail. A preparation entry can still say `prepared` when its
+subprocess succeeded but reading or validating the report failed. CPPython
+report-write failures propagate as command failures. No report is accepted from
+a failed preparation command, and cleanup failures are surfaced rather than
+silently leaving a report behind.
+
+The JSON projection excludes raw commands, native intent, subprocess output,
+and exception text to avoid exposing credentials. Error codes remain structured;
+details remain on stderr. Existing `--record` and `--jsonl` formats are unchanged.
 
 ## Confirmation and Progress
 

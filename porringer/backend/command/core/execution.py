@@ -10,6 +10,7 @@ proceeding.
 import asyncio
 import logging
 import os
+import sys
 import sysconfig
 import threading
 import time
@@ -17,8 +18,10 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import cast
+from uuid import uuid4
 
 import aiohttp
+from pydantic import ValidationError
 
 from porringer.backend.backend import BackendResolver
 from porringer.backend.builder import Builder
@@ -55,6 +58,11 @@ from porringer.schema import (
     Uninstall,
     Upgrade,
 )
+from porringer.schema.observability import Diagnostic, DiagnosticSeverity
+from porringer.schema.preparation import (
+    PREPARATION_REPORT_ENV,
+    PreparationMetadata,
+)
 from porringer.schema.progress import DiscoveredPluginEntry
 from porringer.utility import HTTP_TIMEOUT
 from porringer.utility.exception import PluginError
@@ -63,7 +71,7 @@ from porringer.utility.trace import (
     current_trace_context,
     use_trace_context,
 )
-from porringer.utility.utility import CommandProgress, run_command
+from porringer.utility.utility import CommandProgress, CommandResult, run_command
 
 from .action_builder import (
     PHASE_ORDER,
@@ -1730,10 +1738,10 @@ async def _run_project_install_steps(
         type(proj_env), plan, action.native_intent, action.prepare_command, native_command=action.native_command
     )
 
-    success = True
     returncode: int | None = None
-    step_total = len(steps)
     failed_step_index: int | None = None
+    metadata: PreparationMetadata | None = None
+    diagnostics: tuple[Diagnostic, ...] = ()
 
     def make_step_callback(
         step_number: int,
@@ -1746,9 +1754,9 @@ async def _run_project_install_steps(
                 replace(
                     update,
                     phase='project',
-                    message=update.message or f'Step {step_number}/{step_total}',
+                    message=update.message or f'Step {step_number}/{len(steps)}',
                     step_index=step_number,
-                    step_total=step_total,
+                    step_total=len(steps),
                     command=tuple(args),
                 )
             )
@@ -1761,39 +1769,54 @@ async def _run_project_install_steps(
             ActionProgress(
                 action=action,
                 phase='project',
-                message=f'Step {step_number}/{step_total}',
+                message=f'Step {step_number}/{len(steps)}',
                 step_index=step_number,
-                step_total=step_total,
+                step_total=len(steps),
                 command=tuple(args),
             )
         )
         progress = CommandProgress(action=action, callback=step_callback, phase='project')
         try:
-            cmd_result = await run_command(args, progress=progress, cwd=effective_dir, timeout_seconds=timeout_seconds)
+            if action.prepare_command is not None and step_number == len(steps):
+                cmd_result, metadata, diagnostics = await _run_preparation_command(
+                    args,
+                    progress=progress,
+                    cwd=effective_dir,
+                    timeout_seconds=timeout_seconds,
+                )
+            else:
+                cmd_result = await run_command(
+                    args, progress=progress, cwd=effective_dir, timeout_seconds=timeout_seconds
+                )
         except TimeoutError:
             duration = f' after {timeout_seconds:g} seconds' if timeout_seconds is not None else ''
             return SetupActionResult(
                 action=action,
                 success=False,
-                message=f'Project step {step_number}/{step_total} timed out{duration} via {action.installer}',
+                message=f'Project step {step_number}/{len(steps)} timed out{duration} via {action.installer}',
                 cli_command=tuple(plan.argv),
                 cli_steps=tuple(tuple(step) for step in steps),
                 failed_step_index=step_number,
             )
-        success = cmd_result.returncode == 0
         returncode = cmd_result.returncode
-        if not success:
+        if returncode != 0:
             failed_step_index = step_number
             break
 
-    if success:
+    if failed_step_index is None:
         return SetupActionResult(
             action=action,
-            success=True,
-            message=f'Installed project via {action.installer}',
+            success=not any(item.severity == DiagnosticSeverity.ERROR for item in diagnostics),
+            message=(
+                diagnostics[0].message
+                if any(item.severity == DiagnosticSeverity.ERROR for item in diagnostics)
+                else f'Installed project via {action.installer}'
+            ),
             cli_command=tuple(plan.argv),
             cli_steps=tuple(tuple(step) for step in steps),
             project_prepared=action.prepare_command is not None,
+            preparation_metadata=metadata,
+            preparation_diagnostics=diagnostics,
         )
     # Detailed subprocess output (stdout/stderr) is streamed live as
     # ActionProgress events during the run — the CLI surfaces a tail of
@@ -1809,6 +1832,62 @@ async def _run_project_install_steps(
         cli_command=tuple(plan.argv),
         cli_steps=tuple(tuple(step) for step in steps),
         failed_step_index=failed_step_index,
+    )
+
+
+async def _run_preparation_command(
+    args: list[str],
+    *,
+    progress: CommandProgress,
+    cwd: Path,
+    timeout_seconds: float | None,
+) -> tuple[CommandResult, PreparationMetadata | None, tuple[Diagnostic, ...]]:
+    """Read only successful preparation's dedicated report, and always remove it."""
+    report_path = (cwd / f'.porringer-preparation-{uuid4().hex}.json').absolute()
+    try:
+        result = await run_command(
+            args,
+            progress=progress,
+            cwd=cwd,
+            timeout_seconds=timeout_seconds,
+            env={**os.environ, PREPARATION_REPORT_ENV: str(report_path)},
+        )
+        if result.returncode != 0:
+            return result, None, ()
+        metadata, diagnostics = _preparation_metadata(report_path)
+        return result, metadata, diagnostics
+    finally:
+        active_error = sys.exception()
+        try:
+            report_path.unlink(missing_ok=True)
+        except OSError as cleanup_error:
+            if active_error is None:
+                raise
+            active_error.add_note('Could not remove the native preparation report.')
+            logger.error('Could not remove preparation report %s: %s', report_path, cleanup_error)
+
+
+def _preparation_metadata(report_path: Path) -> tuple[PreparationMetadata | None, tuple[Diagnostic, ...]]:
+    """Validate the report without leaking its contents or mistaking logs for metadata."""
+    severity = DiagnosticSeverity.ERROR
+    try:
+        return PreparationMetadata.model_validate_json(report_path.read_text(encoding='utf-8')), ()
+    except FileNotFoundError:
+        code = 'preparation.metadata_unavailable'
+        severity = DiagnosticSeverity.WARNING
+        message = 'Preparation completed, but authoritative native metadata is unavailable.'
+    except ValidationError, UnicodeError:
+        code = 'preparation.metadata_invalid'
+        message = 'Preparation completed, but its native metadata report is invalid.'
+    except OSError:
+        code = 'preparation.metadata_read_failed'
+        message = 'Preparation completed, but its native metadata report could not be read.'
+    return None, (
+        Diagnostic(
+            code=code,
+            severity=severity,
+            message=message,
+        ),
     )
 
 

@@ -7,7 +7,7 @@ import asyncio
 import contextlib
 import os
 from collections import deque
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Literal, NamedTuple, cast
 
 from porringer.schema import ActionProgress, SetupAction
@@ -81,6 +81,7 @@ async def run_command(
     cancellation_check: asyncio.Event | None = None,
     progress: CommandProgress | None = None,
     output_tail_lines: int | None = DEFAULT_COMMAND_OUTPUT_TAIL_LINES,
+    env: Mapping[str, str] | None = None,
     **kwargs: object,
 ) -> CommandResult:
     """Run a command asynchronously using asyncio subprocess.
@@ -99,6 +100,7 @@ async def run_command(
         output_tail_lines: Number of trailing lines retained in the returned
             ``CommandResult`` per channel when ``progress`` is provided.
             ``None`` preserves full output.
+        env: Optional complete environment for this subprocess only.
         **kwargs: Backward-compatible support for legacy ``timeout=`` calls.
 
     Returns:
@@ -125,6 +127,7 @@ async def run_command(
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=cwd,
+            env=env,
         )
     except Exception as exc:
         trace.finish(returncode=None, error=f'{type(exc).__name__}: {exc}')

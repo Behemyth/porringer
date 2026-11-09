@@ -2,7 +2,7 @@
 
 import json
 import sys
-from asyncio import Queue
+from asyncio import CancelledError, Queue
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, patch
@@ -25,6 +25,7 @@ from porringer.plugin.poetry.plugin import PoetryEnvironment
 from porringer.plugin.uv.plugin import UvEnvironment
 from porringer.schema import (
     ActionCompletedEvent,
+    ActionProgressEvent,
     BatchSetupResults,
     SetupAction,
     SetupActionResult,
@@ -33,9 +34,10 @@ from porringer.schema import (
     SetupResults,
     progress_event_snapshot,
 )
+from porringer.schema.preparation import PREPARATION_REPORT_ENV
 from porringer.test.mock.project_environment import MockProjectEnvironment
 from porringer.utility.exception import ManifestError
-from porringer.utility.utility import CommandResult
+from porringer.utility.utility import CommandProgress, CommandResult
 
 _NATIVE = {'schema_version': 1, 'root': '..', 'default': 'local', 'packages': {'periapsis': {}}}
 _FIXTURES = Path(__file__).resolve().parents[1] / 'fixtures' / 'native'
@@ -222,6 +224,156 @@ async def test_preparation_execution_matches_preview(tmp_path: Path) -> None:
     assert all(call.kwargs['cwd'] == root for call in mock_run.await_args_list)
 
 
+@pytest.mark.parametrize(
+    ('report', 'diagnostic'),
+    [
+        (None, 'preparation.metadata_unavailable'),
+        ('{"password":"do-not-emit"}', 'preparation.metadata_invalid'),
+        ('{}\n{}', 'preparation.metadata_invalid'),
+        ('{"backend":"cmake","provider":"conan"}', 'preparation.metadata_invalid'),
+        ('{"schema_version":"2","backend":"cmake","provider":"conan"}', 'preparation.metadata_invalid'),
+        (
+            json.dumps({
+                'schema_version': '1',
+                'identity': 'actual-selection',
+                'backend': 'cmake',
+                'provider': 'conan',
+            }),
+            None,
+        ),
+    ],
+)
+async def test_preparation_metadata_is_explicit(tmp_path: Path, report: str | None, diagnostic: str | None) -> None:
+    """Only the dedicated file from successful preparation supplies native facts."""
+    root = _project(tmp_path)
+    plugins = _plugins()
+    manifest = SetupManifest.model_validate({'project': {'ecosystem': 'python', 'prepare': True}})
+    action = _project_action(build_actions(manifest, plugins, search_from=root))
+    report_paths: list[Path] = []
+
+    def command(_args: list[str], **kwargs: Any) -> CommandResult:
+        if environment := kwargs.get('env'):
+            path = Path(environment[PREPARATION_REPORT_ENV])
+            report_paths.append(path)
+            assert path.is_absolute()
+            assert path.parent == root
+            if report is not None:
+                path.write_text(report, encoding='utf-8')
+        return CommandResult(0, 'CPPYTHON_PREPARATION_V1:{"backend":"ignored-log"}', '')
+
+    with patch(
+        'porringer.backend.command.core.execution.run_command',
+        new_callable=AsyncMock,
+        side_effect=command,
+    ) as run:
+        result = await execution._execute_project_install(
+            action, plugins.project_environments, root, SetupParameters(), event_queue=Queue()
+        )
+    assert result.success == (diagnostic in {None, 'preparation.metadata_unavailable'})
+    assert result.project_prepared
+    assert 'env' not in run.await_args_list[0].kwargs
+    assert report_paths
+    assert not report_paths[0].exists()
+    if diagnostic:
+        assert result.preparation_metadata is None
+        assert result.preparation_diagnostics[0].code == diagnostic
+        assert 'do-not-emit' not in result.preparation_diagnostics[0].model_dump_json()
+    else:
+        assert result.preparation_metadata is not None
+        assert result.preparation_metadata.identity == 'actual-selection'
+        assert result.preparation_metadata.provider == 'conan'
+        assert result.preparation_metadata.dependency_outputs is None
+    snapshot = progress_event_snapshot(ActionCompletedEvent(action=action, result=result))
+    assert snapshot.result is not None
+    assert snapshot.result.preparation_metadata == result.preparation_metadata
+
+
+@pytest.mark.parametrize('error', [None, TimeoutError(), CancelledError()])
+async def test_failed_or_interrupted_preparation_never_reads_report(
+    tmp_path: Path, error: BaseException | None
+) -> None:
+    """Report cleanup covers process failure, timeout and cancellation, without consuming failed output."""
+    root = _project(tmp_path)
+    plugins = _plugins()
+    manifest = SetupManifest.model_validate({'project': {'ecosystem': 'python', 'prepare': True}})
+    action = _project_action(build_actions(manifest, plugins, search_from=root))
+    report_paths: list[Path] = []
+
+    def command(_args: list[str], **kwargs: Any) -> CommandResult:
+        if environment := kwargs.get('env'):
+            path = Path(environment[PREPARATION_REPORT_ENV])
+            report_paths.append(path)
+            path.write_text('invalid report that must never be read', encoding='utf-8')
+            if error is not None:
+                raise error
+            return CommandResult(1, '', 'preparation failed')
+        return CommandResult(0, '', '')
+
+    with (
+        patch('porringer.backend.command.core.execution.run_command', side_effect=command),
+        patch('porringer.backend.command.core.execution._preparation_metadata') as read_report,
+    ):
+        if isinstance(error, CancelledError):
+            with pytest.raises(CancelledError):
+                await execution._execute_project_install(
+                    action, plugins.project_environments, root, SetupParameters(), event_queue=Queue()
+                )
+        else:
+            result = await execution._execute_project_install(
+                action, plugins.project_environments, root, SetupParameters(), event_queue=Queue()
+            )
+            assert not result.success
+            assert not result.project_prepared
+        read_report.assert_not_called()
+    assert report_paths
+    assert not report_paths[0].exists()
+
+
+def test_preparation_report_read_error_is_explicit(tmp_path: Path) -> None:
+    """Unreadable reports are errors rather than old-version compatibility warnings."""
+    with patch.object(Path, 'read_text', side_effect=PermissionError('private-details')):
+        metadata, diagnostics = execution._preparation_metadata(tmp_path / 'report.json')
+    assert metadata is None
+    assert diagnostics[0].code == 'preparation.metadata_read_failed'
+    assert diagnostics[0].severity == 'error'
+    assert 'private-details' not in diagnostics[0].model_dump_json()
+
+
+@pytest.mark.parametrize('error', [None, TimeoutError(), CancelledError()])
+async def test_report_cleanup_errors_do_not_replace_primary_failure(
+    tmp_path: Path, error: BaseException | None
+) -> None:
+    """Cleanup failures surface, but the original timeout or cancellation remains authoritative."""
+    action = SetupAction(description='Prepare')
+    with (
+        patch(
+            'porringer.backend.command.core.execution.run_command',
+            new_callable=AsyncMock,
+            side_effect=error,
+            return_value=CommandResult(0, '', ''),
+        ),
+        patch.object(Path, 'unlink', side_effect=PermissionError('cleanup failed')),
+    ):
+        if error is None:
+            with pytest.raises(PermissionError, match='cleanup failed'):
+                await execution._run_preparation_command(
+                    ['prepare'],
+                    progress=CommandProgress(action=action, callback=lambda _: None),
+                    cwd=tmp_path,
+                    timeout_seconds=None,
+                )
+        else:
+            with pytest.raises(type(error)) as caught:
+                await execution._run_preparation_command(
+                    ['prepare'],
+                    progress=CommandProgress(action=action, callback=lambda _: None),
+                    cwd=tmp_path,
+                    timeout_seconds=None,
+                )
+            assert caught.value is error
+            assert 'Could not remove the native preparation report.' in error.__notes__
+
+
 async def test_handoff_commands_remain_as_previewed_if_plugin_changes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -253,6 +405,20 @@ async def test_real_project_subprocesses_match_preview(tmp_path: Path) -> None:
 
     def command(label: str) -> list[str]:
         script = f"from pathlib import Path; Path('steps.log').open('a').write('{label}\\n')"
+        if label == 'prepare':
+            report = json.dumps({
+                'schema_version': '1',
+                'identity': 'actual-subprocess-selection',
+                'backend': 'cmake',
+                'provider': 'conan',
+                'dependency_outputs': [str(root / 'provider-output')],
+            })
+            script += (
+                f'; import os; report_path = Path(os.environ[{PREPARATION_REPORT_ENV!r}])'
+                f"; assert report_path.is_absolute(); report_path.write_text({report!r}, encoding='utf-8')"
+                "; print('CPPYTHON_PREPARATION_V1:ordinary-log-not-a-report')"
+                "; print('\\n'.join('later output' for _ in range(250)))"
+            )
         return [sys.executable, '-c', script]
 
     class _ScriptedProject(_RunnableProject):
@@ -276,17 +442,30 @@ async def test_real_project_subprocesses_match_preview(tmp_path: Path) -> None:
     action = _project_action(build_actions(manifest, plugins, search_from=root))
     preview = get_cli_steps(action, plugins)
 
+    events: Queue = Queue()
     result = await execution._execute_project_install(
-        action, plugins.project_environments, root, SetupParameters(), event_queue=Queue()
+        action, plugins.project_environments, root, SetupParameters(), event_queue=events
     )
 
     assert result.success, result.message
     assert result.project_prepared
     assert result.cli_steps == preview
     assert (root / 'steps.log').read_text(encoding='utf-8').splitlines() == ['sync', 'native', 'prepare']
+    assert result.preparation_metadata is not None
+    assert result.preparation_metadata.identity == 'actual-subprocess-selection'
+    assert result.preparation_metadata.provider == 'conan'
+    assert result.preparation_metadata.dependency_outputs == (root / 'provider-output',)
     snapshot = progress_event_snapshot(ActionCompletedEvent(action=action, result=result))
     assert snapshot.result is not None
     assert snapshot.result.model_dump(mode='json')['project_prepared'] is True
+    assert snapshot.result.preparation_metadata == result.preparation_metadata
+    assert not list(root.glob('.porringer-preparation-*.json'))
+    output = []
+    while not events.empty():
+        event = events.get_nowait()
+        if isinstance(event, ActionProgressEvent):
+            output.append(event.progress.output)
+    assert 'CPPYTHON_PREPARATION_V1:ordinary-log-not-a-report' in output
 
 
 def test_final_output_distinguishes_prepared_projects() -> None:

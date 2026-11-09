@@ -4,6 +4,9 @@ Porringer CLI install command.
 """
 
 import asyncio
+import contextlib
+import sys
+from collections.abc import Generator
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from math import isfinite
@@ -18,6 +21,7 @@ from porringer.console.command.preview import _display_report
 from porringer.console.common import (
     EXIT_FAILURE,
     GlobalOption,
+    JsonOption,
     OnlyActionOption,
     PluginOption,
     ProjectDirOption,
@@ -29,14 +33,17 @@ from porringer.console.common import (
     classify_target,
     confirm_or_abort,
     create_api,
+    emit_json,
     global_manifest_or_exit,
     parse_shared_options,
     reject_groups_for_profile,
     resolve_target_or_exit,
 )
+from porringer.console.output import build_console
 from porringer.console.schema import ConsoleConfiguration
-from porringer.schema import InspectionMode, SyncPlan, SyncStrategy
+from porringer.schema import BatchSetupResults, InspectionMode, SyncPlan, SyncStrategy
 from porringer.utility.exception import PlanStaleError
+from porringer.utility.preparation import install_envelope
 
 
 @dataclass(slots=True)
@@ -53,6 +60,39 @@ class _InstallOptions:
     as_jsonl: bool = False
     record_path: Path | None = None
     yes: bool = False
+    results: BatchSetupResults | None = None
+
+
+@contextlib.contextmanager
+def _install_output(
+    configuration: ConsoleConfiguration, *, as_json: bool, options: _InstallOptions
+) -> Generator[ConsoleConfiguration]:
+    """Keep JSON on stdout and preserve human diagnostics, confirmation, and exit semantics."""
+    if not as_json:
+        yield configuration
+        return
+    outcome = 'completed'
+    try:
+        with contextlib.redirect_stdout(sys.stderr):
+            yield configuration.model_copy(
+                update={'console': build_console(stderr=True), 'error_console': build_console(stderr=True)}
+            )
+    except typer.Exit as exc:
+        outcome = 'cancelled' if exc.exit_code == 0 else 'failed'
+        raise
+    except KeyboardInterrupt, asyncio.CancelledError:
+        outcome = 'cancelled'
+        raise
+    except SystemExit as exc:
+        outcome = 'failed' if exc.code else 'cancelled'
+        raise
+    except Exception:
+        outcome = 'failed'
+        raise
+    finally:
+        if outcome == 'completed' and options.results is not None and not options.results.success:
+            outcome = 'failed'
+        emit_json(install_envelope(options.results, outcome=outcome))
 
 
 def _confirm_or_abort(configuration: ConsoleConfiguration, yes: bool) -> None:
@@ -124,6 +164,7 @@ def _run_manifest_install(
         configuration.output.error(str(exc))
         raise typer.Exit(EXIT_FAILURE) from None
 
+    options.results = execute_results
     if execute_results.total_actions == 0:
         if not options.as_jsonl:
             configuration.output.warning('No actions to execute')
@@ -176,6 +217,7 @@ def _run_profile_install(
         )
     )
 
+    options.results = execution.results
     sync_command._display_results(configuration, execution.results, options.strategy)
     if not execution.results.success:
         raise typer.Exit(EXIT_FAILURE)
@@ -202,6 +244,7 @@ def install_default(  # noqa: PLR0913
     plugin: PluginOption = None,
     only_action: OnlyActionOption = None,
     with_groups: WithOption = None,
+    json: JsonOption = False,
     jsonl: Annotated[
         bool,
         typer.Option(
@@ -233,6 +276,48 @@ def install_default(  # noqa: PLR0913
     anything. Pass --yes (or set PORRINGER_ASSUME_YES=1) to run unattended.
     """
     configuration = context.ensure_object(ConsoleConfiguration)
+    options = _InstallOptions()
+    with _install_output(configuration, as_json=json, options=options) as output_configuration:
+        _install_target(
+            output_configuration,
+            options,
+            target,
+            project_dir=project_dir,
+            project_timeout=project_timeout,
+            fail_fast=fail_fast,
+            strategy=strategy,
+            plugin=plugin,
+            only_action=only_action,
+            with_groups=with_groups,
+            jsonl=jsonl,
+            record=record,
+            yes=yes,
+            global_=global_,
+            as_json=json,
+        )
+
+
+def _install_target(  # noqa: PLR0913
+    configuration: ConsoleConfiguration,
+    options: _InstallOptions,
+    target: str | None,
+    *,
+    project_dir: Path | None,
+    project_timeout: float | None,
+    fail_fast: bool,
+    strategy: str,
+    plugin: list[str] | None,
+    only_action: list[str] | None,
+    with_groups: list[str] | None,
+    jsonl: bool,
+    record: Path | None,
+    yes: bool,
+    global_: bool,
+    as_json: bool,
+) -> None:
+    """Resolve and execute an install using the unchanged human execution paths."""
+    if as_json and jsonl:
+        raise typer.BadParameter('--json and --jsonl cannot be combined')
     if project_timeout is not None and (not isfinite(project_timeout) or project_timeout <= 0):
         raise typer.BadParameter('must be a positive finite number of seconds', param_hint='--project-timeout')
 
@@ -244,18 +329,16 @@ def install_default(  # noqa: PLR0913
         only_action=only_action,
         with_groups=with_groups,
     )
-    options = _InstallOptions(
-        project_directory=shared.project_directory,
-        project_timeout_seconds=project_timeout,
-        fail_fast=fail_fast,
-        strategy=shared.strategy,
-        plugin_names=shared.plugin_names,
-        action_ids=shared.action_ids,
-        groups=shared.groups,
-        as_jsonl=jsonl,
-        record_path=record,
-        yes=yes,
-    )
+    options.project_directory = shared.project_directory
+    options.project_timeout_seconds = project_timeout
+    options.fail_fast = fail_fast
+    options.strategy = shared.strategy
+    options.plugin_names = shared.plugin_names
+    options.action_ids = shared.action_ids
+    options.groups = shared.groups
+    options.as_jsonl = jsonl
+    options.record_path = record
+    options.yes = yes
 
     if global_:
         api = create_api(configuration)

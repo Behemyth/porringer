@@ -20,6 +20,7 @@ from porringer.schema.observability import (
     FollowUpAction,
     ResultStatus,
 )
+from porringer.schema.preparation import PreparationMetadata
 
 # ---------------------------------------------------------------------------
 # Operation union — discriminated by type
@@ -229,6 +230,8 @@ class SetupActionResult:
         failed_step_index: One-based command step that failed, when known.
         ref: Stable action reference, attached by ``sync.run``.
         project_prepared: Whether the requested project preparation step completed successfully.
+        preparation_metadata: Authoritative native metadata reported by the preparation subprocess.
+        preparation_diagnostics: Metadata warnings, independent of the install operation's success.
     """
 
     action: SetupAction
@@ -244,6 +247,8 @@ class SetupActionResult:
     failed_step_index: int | None = None
     ref: ActionRef | None = None
     project_prepared: bool = False
+    preparation_metadata: PreparationMetadata | None = None
+    preparation_diagnostics: tuple[Diagnostic, ...] = ()
 
 
 class SyncStrategy(Enum):

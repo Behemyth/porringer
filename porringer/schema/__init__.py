@@ -89,6 +89,7 @@ from porringer.schema.plugin import (
     PluginCapability,
     PluginInfo,
 )
+from porringer.schema.preparation import InstallPayload, PreparationMetadata, PreparationStatus
 from porringer.schema.profile import (
     SetupProfile,
     SetupProfileExecution,
@@ -124,6 +125,9 @@ from porringer.schema.tool import (
 from porringer.utility.exception import ManifestValidationCode
 
 __all__ = [
+    'PreparationMetadata',
+    'PreparationStatus',
+    'InstallPayload',
     'MANIFEST_SCHEMA_DIALECT',
     'MANIFEST_SCHEMA_URL',
     'SCHEMA_VERSION',
