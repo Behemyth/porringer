@@ -14,7 +14,7 @@ from porringer.console.schema import ConsoleConfiguration
 app = typer.Typer()
 
 
-@app.command("list")
+@app.command('list')
 def plugin_list(
     context: typer.Context,
     *,
@@ -33,17 +33,13 @@ def plugin_list(
     if as_json:
         emit_json(results)
     elif not results:
-        configuration.output.warning("No plugins found")
+        configuration.output.warning('No plugins found')
     else:
         for result in results:
-            tool_ver = str(result.tool_version) if result.tool_version else "n/a"
-            status = (
-                "[success]installed[/success]"
-                if result.installed
-                else "[error]not installed[/error]"
-            )
+            tool_ver = str(result.tool_version) if result.tool_version else 'n/a'
+            status = '[success]installed[/success]' if result.installed else '[error]not installed[/error]'
             configuration.output.print(
-                f"{result.name} [{result.kind.value}] v{result.version} (tool: {tool_ver}) {status}"
+                f'{result.name} [{result.kind.value}] v{result.version} (tool: {tool_ver}) {status}'
             )
 
 
